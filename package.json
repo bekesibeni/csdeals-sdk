@@ -1,0 +1,49 @@
+{
+  "name": "csdeals-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the CS Deals (cs.deals) public v1 API",
+  "author": "benji",
+  "license": "Proprietary",
+  "homepage": "https://github.com/bekesibeni/csdeals-sdk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bekesibeni/csdeals-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bekesibeni/csdeals-sdk/issues"
+  },
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "smoke": "tsdown && node --env-file=.env scripts/smoke.mjs",
+    "prepare": "tsdown",
+    "prepublishOnly": "tsdown"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsdown": "^0.22.0",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.1"
+  }
+}

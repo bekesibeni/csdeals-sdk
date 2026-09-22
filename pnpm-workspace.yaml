@@ -1,0 +1,7 @@
+# pnpm 11+ requires an explicit allowlist for any package with a build/prepare script.
+# This file exists for the CONSUMER's benefit: installing this SDK from GitHub makes pnpm
+# clone it and run `pnpm install && pnpm prepare` in an isolated checkout, and an unlisted
+# build script fails that whole install with ERR_PNPM_PREPARE_PACKAGE.
+allowBuilds:
+  # vitest -> vite -> esbuild; fetches its prebuilt platform binary on install.
+  esbuild: true
