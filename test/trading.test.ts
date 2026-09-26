@@ -80,4 +80,26 @@ describe('errors', () => {
     expect(err.isRateLimited).toBe(true);
     expect(err.retryAfterSec).toBe(7);
   });
+
+  // Outages at the edge answer with an HTML page. A purchase that got one may still have landed, and
+  // only the 5xx status tells the caller to reconcile from orders rather than treat it as a bug.
+  it('keeps the status of a non-JSON error page', async () => {
+    const err = await buyAgainst({ status: 502, raw: '<html>Bad gateway</html>', headers: { 'content-type': 'text/html' } }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CsDealsApiError);
+    expect((err as CsDealsApiError).status).toBe(502);
+    expect((err as CsDealsApiError).isRetryable).toBe(true);
+  });
+});
+
+describe('conditional reads', () => {
+  // Read as data, an unchanged book would be an empty one, and every listing would drop out of the catalog.
+  it('returns a 304 as notModified, never as a body', async () => {
+    server = await startServer((req) =>
+      req.headers['if-none-match'] === '"v1"' ? { status: 304 } : { body: { seq: 5, listings: [] }, headers: { etag: '"v1"' } },
+    );
+    const first = await server.sdk.market.getBook({ appId: 252490 });
+    expect(first).toMatchObject({ notModified: false, etag: '"v1"', data: { seq: 5 } });
+    const second = await server.sdk.market.getBook({ appId: 252490, etag: '"v1"' });
+    expect(second).toEqual({ notModified: true, etag: '"v1"' });
+  });
 });

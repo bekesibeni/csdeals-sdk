@@ -7,19 +7,20 @@ selling, withdrawing to Steam, account history, crypto cashouts, signed webhooks
 pnpm add github:bekesibeni/csdeals-sdk
 ```
 
-`dist/` is not committed, so pnpm builds the package on install. pnpm 11 needs it, and its
-`@benji/stdlib` git dependency, in the consuming repo's `allowBuilds`. The bare name covers the
-build-script gate, the exact `name@<resolved-spec>` keys cover the git-dep prepare gate. The install
-error prints the exact key to paste:
+`dist/` is not committed, so pnpm builds the package on install. pnpm 11 needs it in the consuming
+repo's `allowBuilds`. The bare name covers the build-script gate, the exact `name@<resolved-spec>`
+keys cover the git-dep prepare gate. The install error prints the exact key to paste:
 
 ```yaml
 allowBuilds:
   csdeals-sdk: true
   'csdeals-sdk@git+ssh://git@github.com/bekesibeni/csdeals-sdk.git#<sha>': true
   'csdeals-sdk@git+https://git@github.com:bekesibeni/csdeals-sdk.git#<sha>': true
-  '@doctormckay/stdlib': true
-  '@doctormckay/stdlib@https://codeload.github.com/bekesibeni/node-stdlib/tar.gz/<sha>': true
 ```
+
+HTTP runs on [got](https://github.com/sindresorhus/got) 16 with retries off, redirects off and
+gzip/brotli decompression, through keep-alive agents or the proxy agent. The feed socket egresses
+through the same agent.
 
 ```ts
 import { AppId, CsDealsSDK } from 'csdeals-sdk';

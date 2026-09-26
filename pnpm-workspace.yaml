@@ -3,7 +3,5 @@
 # clone it and run `pnpm install && pnpm prepare` in an isolated checkout, and an unlisted
 # build script fails that whole install with ERR_PNPM_PREPARE_PACKAGE.
 allowBuilds:
-  # @benji/stdlib is an alias for this - itself a git dep, and git deps always "build".
-  '@doctormckay/stdlib': true
   # vitest -> vite -> esbuild; fetches its prebuilt platform binary on install.
   esbuild: true

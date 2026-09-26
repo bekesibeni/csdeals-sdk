@@ -1,5 +1,5 @@
-import { HttpClient } from '@benji/stdlib/http.js';
-import type { HttpClientOptions, HttpResponse } from '@benji/stdlib/http.js';
+import got from 'got';
+import type { Got, Response } from 'got';
 import { Agent as NodeHttpAgent } from 'node:http';
 import type { Agent as HttpAgent } from 'node:http';
 import { Agent as NodeHttpsAgent } from 'node:https';
@@ -42,29 +42,33 @@ export class CsDealsClient {
   readonly wsUrl: string;
   readonly userAgent: string;
   private readonly apiKey: string;
-  private readonly http: HttpClient;
+  private readonly http: Got;
   private readonly agents: Agents;
+  private readonly timeout: number;
 
   constructor({ apiKey, baseUrl = DEFAULT_BASE_URL, wsUrl = DEFAULT_WS_URL, timeout = DEFAULT_TIMEOUT_MS, proxy }: CsDealsClientOptions) {
     if (!apiKey) throw new Error('CsDealsClient: apiKey is required');
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
     this.wsUrl = wsUrl;
+    this.timeout = timeout;
     this.userAgent = `csdeals-sdk/${SDK_VERSION} (+https://github.com/bekesibeni/csdeals-sdk)`;
     this.agents = proxy ? buildProxyAgents(proxy) : buildDirectAgents();
 
-    const httpOptions: HttpClientOptions = {
-      defaultHeaders: {
-        Accept: 'application/json',
-        'User-Agent': this.userAgent,
-        Authorization: `Bearer ${apiKey}`,
+    this.http = got.extend({
+      prefixUrl: this.baseUrl,
+      headers: {
+        accept: 'application/json',
+        'user-agent': this.userAgent,
+        authorization: `Bearer ${apiKey}`,
       },
-      defaultTimeout: timeout,
-      gzip: true,
-      httpAgent: this.agents.http,
-      httpsAgent: this.agents.https,
-    };
-    this.http = new HttpClient(httpOptions);
+      agent: { http: this.agents.http, https: this.agents.https },
+      responseType: 'json',
+      throwHttpErrors: false,
+      followRedirect: false,
+      // Never resend: a purchase has no idempotency key, so a replayed POST buys twice.
+      retry: { limit: 0 },
+    });
   }
 
   /** Agent for the WebSocket, so it egresses exactly like REST. */
@@ -98,7 +102,7 @@ export class CsDealsClient {
       timeout: options.timeout,
       headers: options.etag ? { 'If-None-Match': options.etag } : undefined,
     });
-    const etag = typeof response.headers.etag === 'string' ? response.headers.etag : undefined;
+    const etag = response.headers.etag;
     if (response.statusCode === 304) return { notModified: true, etag: etag ?? options.etag };
     return { notModified: false, etag, data: unwrap<T>(response) };
   }
@@ -112,29 +116,29 @@ export class CsDealsClient {
   }
 
   private send(
-    method: string,
+    method: 'GET' | 'POST' | 'PATCH',
     path: string,
     options: { query?: Query | undefined; body?: Body; timeout?: number | undefined; headers?: Record<string, string> | undefined },
-  ): Promise<HttpResponse> {
-    const url = new URL(path.replace(/^\/+/, ''), this.baseUrl);
+  ): Promise<Response<unknown>> {
+    const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(options.query ?? {})) {
-      if (value !== undefined && value !== null) url.searchParams.append(key, String(value));
+      if (value !== undefined && value !== null) searchParams.append(key, String(value));
     }
-    return this.http.request({
+    return this.http(path.replace(/^\/+/, ''), {
       method,
-      url: url.toString(),
+      searchParams,
+      timeout: { request: options.timeout ?? this.timeout },
       ...(options.headers ? { headers: options.headers } : {}),
       ...(options.body ? { json: options.body } : {}),
-      ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
     });
   }
 }
 
-function unwrap<T>(response: HttpResponse): T {
+function unwrap<T>(response: Response<unknown>): T {
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new CsDealsApiError(response.statusCode, response.jsonBody ?? null, parseRetryAfter(response.headers['retry-after']));
+    throw new CsDealsApiError(response.statusCode, response.body ?? null, parseRetryAfter(response.headers['retry-after']));
   }
-  return response.jsonBody as T;
+  return response.body as T;
 }
 
 /** `Retry-After` is either delta-seconds or an HTTP date. */

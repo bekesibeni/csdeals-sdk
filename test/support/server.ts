@@ -16,6 +16,8 @@ export interface Received {
 export interface Reply {
   status?: number;
   body?: unknown;
+  /** Sent as-is instead of JSON-encoding `body`. */
+  raw?: string;
   headers?: Record<string, string>;
 }
 
@@ -42,7 +44,7 @@ export async function startServer(
       requests.push(received);
       const reply = await handler(received);
       res.writeHead(reply.status ?? 200, { 'content-type': 'application/json', ...reply.headers });
-      res.end(reply.body === undefined ? '' : JSON.stringify(reply.body));
+      res.end(reply.raw ?? (reply.body === undefined ? '' : JSON.stringify(reply.body)));
     });
   });
 
