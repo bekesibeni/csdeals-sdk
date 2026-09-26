@@ -1,16 +1,5 @@
-import type {
-  AppIdParam,
-  BulkResult,
-  Cents,
-  LeanListing,
-  PageMetadata,
-  PageParams,
-  PriceDecayInput,
-  RequestOptions,
-  TokenLine,
-} from "../../core/types.js";
-
-// ── Entities ──
+import type { BulkResult, LeanListing, PageMetadata, PageParams } from '../../core/types.js';
+import type { TokenLine } from '../trading/types.js';
 
 export interface SteamInventoryItem {
   /** Signed, account-bound, valid 30 minutes. Covers at most this row's `amount`. */
@@ -22,8 +11,8 @@ export interface SteamInventoryItem {
   amount: number;
   commodity: boolean;
   tradable: boolean;
-  market_price: Cents;
-  recommended_price: Cents;
+  market_price: number;
+  recommended_price: number;
   icon_url: string;
 }
 
@@ -32,7 +21,7 @@ export interface SteamInventoryResponse {
 }
 
 export interface SellResult {
-  /** Each matches `deposit_id` on a `trades` row; nothing lists until the offer is accepted. */
+  /** Each matches `deposit_id` on a trade; nothing lists until the offer is accepted. */
   deposit_ids: number[];
 }
 
@@ -45,7 +34,7 @@ export interface EditResult extends BulkResult {
 }
 
 export interface EditListingsResult {
-  /** In request order. Each listing is its own transaction. */
+  /** In request order; each listing is its own transaction. */
   results: EditResult[];
 }
 
@@ -58,8 +47,8 @@ export interface DelistManyResult {
 }
 
 export interface PriceDecayState {
-  start_price: Cents;
-  end_price: Cents;
+  start_price: number;
+  end_price: number;
   total_hours: number;
   elapsed_hours: number;
 }
@@ -70,7 +59,7 @@ export interface MyListing extends LeanListing {
   price_decay: PriceDecayState | null;
 }
 
-export type MyListingStatus = "ACTIVE" | "DISABLED" | "FILLED" | "PRIVATE";
+export type MyListingStatus = 'ACTIVE' | 'DISABLED' | 'FILLED' | 'PRIVATE';
 
 export interface MyListingsResponse {
   listings: MyListing[];
@@ -80,59 +69,49 @@ export interface MyListingsResponse {
 export interface MyListingsValue {
   listing_count: number;
   item_count: number;
-  total_value: Cents;
+  total_value: number;
 }
 
-// ── Params ──
-
-export interface SteamInventoryParams extends RequestOptions {
-  app_id: AppIdParam;
+export interface PriceDecay {
+  startPrice: number;
+  /** Below `startPrice`. */
+  endPrice: number;
+  /** 24-168. */
+  totalHours: number;
 }
 
 export interface SellGroup {
-  /** 1-50 stacks sold as one listing. */
   items: TokenLine[];
   /** Per copy. */
-  price: Cents;
-}
-
-export interface SellParams extends RequestOptions {
-  /** 1-50 groups. One trade offer per game, at most 500 copies per offer. */
-  listings: SellGroup[];
+  price: number;
 }
 
 export interface BackpackLine {
-  /** Backpack item id. The same commodity id may appear in several groups; they draw from one pool. */
+  /** Backpack item id. */
   id: number;
   amount: number;
 }
 
-export type ListGroup =
-  | { items: BackpackLine[]; price: Cents; price_decay?: never }
-  | { items: BackpackLine[]; price_decay: PriceDecayInput; price?: never };
-
-export interface ListParams extends RequestOptions {
-  /** 1-50 groups; each becomes one listing. */
-  listings: ListGroup[];
+/** One listing: a flat `price` or a `priceDecay` curve, not both. */
+export interface ListGroup {
+  items: BackpackLine[];
+  price?: number;
+  priceDecay?: PriceDecay;
 }
 
 /**
- * `price` alone reprices the whole stack in place. `amount` alone grows or shrinks it (surplus
- * returns to the backpack). `amount` WITH `price` is a partial reprice: this listing keeps `amount`
- * at the new price and the rest moves to a new listing at the old one, even if the price is equal.
+ * `price` alone reprices the whole stack in place. `amount` alone grows or shrinks it. `amount` WITH
+ * `price` is a partial reprice: this listing keeps `amount` at the new price and the rest moves to a
+ * new listing at the old one, even when the price is unchanged.
  */
 export interface ListingEdit {
-  listing_id: number;
-  price?: Cents;
-  price_decay?: PriceDecayInput;
+  listingId: number;
+  price?: number;
+  priceDecay?: PriceDecay;
   amount?: number;
 }
 
-export interface MyListingsParams extends PageParams, RequestOptions {
-  app_id?: AppIdParam;
+export interface GetMyListingsParams extends PageParams {
+  appId?: number;
   status?: MyListingStatus;
-}
-
-export interface MyListingsValueParams extends RequestOptions {
-  app_id?: AppIdParam;
 }

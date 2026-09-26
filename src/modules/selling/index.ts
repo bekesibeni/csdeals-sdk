@@ -1,161 +1,88 @@
-import { type CsDealsClient, pickRequestOptions } from "../../core/client.js";
-import { type IterateOptions, iteratePages } from "../../core/paginate.js";
-import type { LeanListing, RequestOptions } from "../../core/types.js";
-import {
-  assertLines,
-  assertOneOf,
-  assertPositiveInt,
-  assertPricing,
-  assertTokenLines,
-  invalidRequest,
-} from "../../core/validate.js";
+import type { CsDealsClient } from '../../core/client.js';
+import type { LeanListing } from '../../core/types.js';
 import type {
   DelistManyResult,
   DelistResult,
   EditListingsResult,
+  GetMyListingsParams,
+  ListGroup,
   ListingEdit,
-  ListParams,
   ListResult,
-  MyListing,
-  MyListingsParams,
   MyListingsResponse,
   MyListingsValue,
-  MyListingsValueParams,
-  SellParams,
+  PriceDecay,
+  SellGroup,
   SellResult,
-  SteamInventoryParams,
   SteamInventoryResponse,
-} from "./types.js";
+} from './types.js';
 
-const MY_LISTING_STATUSES = ["ACTIVE", "DISABLED", "FILLED", "PRIVATE"] as const;
+function decay(curve: PriceDecay | undefined) {
+  return curve && { start_price: curve.startPrice, end_price: curve.endPrice, total_hours: curve.totalHours };
+}
 
-function editBody(edit: ListingEdit, what: string): Record<string, unknown> {
-  assertPositiveInt(edit?.listing_id, `${what}.listing_id`);
-  assertPricing(edit, what, false);
-  if (edit.amount !== undefined) assertPositiveInt(edit.amount, `${what}.amount`);
-  if (edit.price === undefined && edit.price_decay === undefined && edit.amount === undefined) {
-    invalidRequest(`${what} changes nothing: send price, price_decay or amount`);
-  }
-  return {
-    listing_id: edit.listing_id,
-    ...(edit.price !== undefined ? { price: edit.price } : {}),
-    ...(edit.price_decay !== undefined ? { price_decay: edit.price_decay } : {}),
-    ...(edit.amount !== undefined ? { amount: edit.amount } : {}),
-  };
+function edit(change: ListingEdit) {
+  return { listing_id: change.listingId, price: change.price, price_decay: decay(change.priceDecay), amount: change.amount };
 }
 
 export function initSellingModule(client: CsDealsClient) {
-  const module = {
-    /** Your live Steam inventory, one row per stack, each with a 30-minute `token`. 5/min. */
-    async steamInventory(params: SteamInventoryParams): Promise<SteamInventoryResponse> {
-      assertPositiveInt(params?.app_id, "app_id");
-      return client.get("/public/v1/steam-inventory", {
-        ...pickRequestOptions(params),
-        query: { app_id: params.app_id },
-      });
+  return {
+    /** The account's live Steam inventory, one row per stack, each with a 30-minute `token`. 5/min. */
+    async getSteamInventory(appId: number): Promise<SteamInventoryResponse> {
+      return client.get('steam-inventory', { app_id: appId });
     },
 
-    /** Lists straight from Steam: we get a trade offer, and items list once it is accepted. */
-    async sell(params: SellParams): Promise<SellResult> {
-      assertLines(params.listings, "listings");
-      params.listings.forEach((group, i) => {
-        assertTokenLines(group?.items, `listings[${i}].items`);
-        assertPositiveInt(group.price, `listings[${i}].price`);
+    /** Lists straight from Steam: the account gets a trade offer, and items list once it is accepted. */
+    async sell(groups: SellGroup[]): Promise<SellResult> {
+      return client.post('sell', {
+        listings: groups.map((group) => ({
+          items: group.items.map((line) => ({ token: line.token, amount: line.amount })),
+          price: group.price,
+        })),
       });
-      return client.post(
-        "/public/v1/sell",
-        {
-          listings: params.listings.map((group) => ({
-            items: group.items.map((line) => ({ token: line.token, amount: line.amount })),
-            price: group.price,
-          })),
-        },
-        pickRequestOptions(params),
-      );
     },
 
     /** Lists backpack items, one listing per group. */
-    async list(params: ListParams): Promise<ListResult> {
-      assertLines(params.listings, "listings");
-      params.listings.forEach((group, i) => {
-        assertLines(group?.items, `listings[${i}].items`);
-        group.items.forEach((line, j) => {
-          assertPositiveInt(line?.id, `listings[${i}].items[${j}].id`);
-          assertPositiveInt(line.amount, `listings[${i}].items[${j}].amount`);
-        });
-        assertPricing(group, `listings[${i}]`, true);
+    async list(groups: ListGroup[]): Promise<ListResult> {
+      return client.post('list', {
+        listings: groups.map((group) => ({
+          items: group.items.map((line) => ({ id: line.id, amount: line.amount })),
+          price: group.price,
+          price_decay: decay(group.priceDecay),
+        })),
       });
-      return client.post(
-        "/public/v1/list",
-        {
-          listings: params.listings.map((group) => ({
-            items: group.items.map((line) => ({ id: line.id, amount: line.amount })),
-            ...(group.price !== undefined ? { price: group.price } : { price_decay: group.price_decay }),
-          })),
-        },
-        pickRequestOptions(params),
-      );
     },
 
-    /** Edits one listing. See {@link ListingEdit} for how `price` and `amount` combine. */
-    async editListing(edit: ListingEdit, options?: RequestOptions): Promise<LeanListing> {
-      return client.patch("/public/v1/list", editBody(edit, "edit"), pickRequestOptions(options));
+    async editListing(change: ListingEdit): Promise<LeanListing> {
+      return client.patch('list', edit(change));
     },
 
-    /** Edits up to 50 listings in one call; each succeeds or fails on its own. */
-    async editListings(edits: ListingEdit[], options?: RequestOptions): Promise<EditListingsResult> {
-      assertLines(edits, "listings");
-      return client.patch(
-        "/public/v1/list",
-        { listings: edits.map((edit, i) => editBody(edit, `listings[${i}]`)) },
-        pickRequestOptions(options),
-      );
+    /** Up to 50 edits; each succeeds or fails on its own. */
+    async editListings(changes: ListingEdit[]): Promise<EditListingsResult> {
+      return client.patch('list', { listings: changes.map(edit) });
     },
 
     /** Takes a listing down; its items return to the backpack. */
-    async delist(listingId: number, options?: RequestOptions): Promise<DelistResult> {
-      assertPositiveInt(listingId, "listing_id");
-      return client.post("/public/v1/delist", { listing_id: listingId }, pickRequestOptions(options));
+    async delist(listingId: number): Promise<DelistResult> {
+      return client.post('delist', { listing_id: listingId });
     },
 
-    async delistMany(listingIds: number[], options?: RequestOptions): Promise<DelistManyResult> {
-      assertLines(listingIds, "listing_ids");
-      listingIds.forEach((id, i) => assertPositiveInt(id, `listing_ids[${i}]`));
-      return client.post("/public/v1/delist", { listing_ids: listingIds }, pickRequestOptions(options));
+    async delistMany(listingIds: number[]): Promise<DelistManyResult> {
+      return client.post('delist', { listing_ids: listingIds });
     },
 
-    async myListings(params: MyListingsParams = {}): Promise<MyListingsResponse> {
-      assertOneOf(params.status, MY_LISTING_STATUSES, "status");
-      return client.get("/public/v1/my-listings", {
-        ...pickRequestOptions(params),
-        query: {
-          page: params.page ?? 1,
-          limit: params.limit ?? 100,
-          app_id: params.app_id,
-          status: params.status,
-        },
+    async getMyListings(params: GetMyListingsParams = {}): Promise<MyListingsResponse> {
+      return client.get('my-listings', {
+        app_id: params.appId,
+        status: params.status,
+        page: params.page ?? 1,
+        limit: params.limit ?? 100,
       });
     },
 
-    async myListingsValue(params: MyListingsValueParams = {}): Promise<MyListingsValue> {
-      return client.get("/public/v1/my-listings/value", {
-        ...pickRequestOptions(params),
-        query: { app_id: params.app_id },
-      });
-    },
-
-    iterateMyListings(
-      params: Omit<MyListingsParams, "page"> = {},
-      options: IterateOptions = {},
-    ): AsyncGenerator<MyListing, void, undefined> {
-      return iteratePages(
-        (page) => module.myListings({ ...params, page }),
-        (r) => r.listings,
-        { minIntervalMs: 1_000, signal: params.signal, ...options },
-      );
+    async getMyListingsValue(appId?: number): Promise<MyListingsValue> {
+      return client.get('my-listings/value', { app_id: appId });
     },
   };
-  return module;
 }
 
-export * from "./types.js";
+export * from './types.js';

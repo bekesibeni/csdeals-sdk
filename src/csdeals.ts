@@ -1,71 +1,58 @@
-import { type CallOptions, CsDealsClient, type CsDealsClientOptions, type HttpMethod } from "./core/client.js";
-import { CsDealsError } from "./core/errors.js";
-import { initAccountModule } from "./modules/account/index.js";
-import { CsDealsFeed, LiveBook, type LiveBookOptions } from "./modules/feed/index.js";
-import type { FeedOptions } from "./modules/feed/types.js";
-import { initMarketModule } from "./modules/market/index.js";
-import { initSellingModule } from "./modules/selling/index.js";
-import { initTradingModule } from "./modules/trading/index.js";
-import { verifyWebhook } from "./modules/webhooks/index.js";
-import type { VerifiedWebhook, WebhookHeaders } from "./modules/webhooks/types.js";
+import { CsDealsClient, type CsDealsClientOptions } from './core/client.js';
+import { initAccountModule } from './modules/account/index.js';
+import { initMarketModule } from './modules/market/index.js';
+import { initSellingModule } from './modules/selling/index.js';
+import { initTradingModule } from './modules/trading/index.js';
+import { initWebhooksModule } from './modules/webhooks/index.js';
+import { CsDealsWebSocket, LiveBook } from './ws/index.js';
+import type { CsDealsWebSocketOptions, FeedEventName, LiveBookOptions } from './ws/types.js';
 
 export interface CsDealsSDKOptions extends CsDealsClientOptions {
-  /** `whsec_...`; enables `verifyWebhook`. Derived from the API key, so rerolling the key rotates it. */
+  /** `whsec_...`, only needed to verify webhooks. Derived from the API key: rerolling the key rotates it. */
   webhookSecret?: string;
 }
 
-/** CS Deals v1 client. Server-to-server only: the key carries full account authority. */
+const BOOK_EVENTS: FeedEventName[] = ['listing.created', 'listing.price_changed', 'listing.amount_changed', 'listing.removed'];
+
+/** CS Deals public v1. Server-to-server only: the key carries full account authority. */
 export class CsDealsSDK {
-  readonly market;
-  readonly trading;
-  readonly selling;
-  readonly account;
-  private readonly client: CsDealsClient;
-  private readonly webhookSecret: string | undefined;
+  public readonly market;
+  public readonly trading;
+  public readonly selling;
+  public readonly account;
+  public readonly webhooks;
+  public readonly client: CsDealsClient;
 
   constructor(options: CsDealsSDKOptions) {
     this.client = new CsDealsClient(options);
-    this.webhookSecret = options.webhookSecret?.trim() || undefined;
     this.market = initMarketModule(this.client);
     this.trading = initTradingModule(this.client);
     this.selling = initSellingModule(this.client);
     this.account = initAccountModule(this.client);
+    this.webhooks = initWebhooksModule(options.webhookSecret);
   }
 
-  /** Verifies and parses a delivery against the constructor secret. Pass the raw body bytes. */
-  verifyWebhook(
-    rawBody: string | Uint8Array,
-    headers: WebhookHeaders,
-    options?: { nowSeconds?: number; toleranceSeconds?: number },
-  ): VerifiedWebhook {
-    if (!this.webhookSecret) {
-      throw new CsDealsError({
-        key: "NOT_CONFIGURED",
-        status: 0,
-        message: "CsDealsSDK was constructed without a webhookSecret",
-      });
-    }
-    return verifyWebhook(rawBody, headers, { secret: this.webhookSecret, ...options });
+  /** The listing feed. Not connected until `connect()`. */
+  createWebSocket(options?: CsDealsWebSocketOptions): CsDealsWebSocket {
+    return new CsDealsWebSocket(this.client, options);
   }
 
-  /** A listing-activity socket. Call `connect()` on it; at most 3 per user. */
-  feed(options?: FeedOptions): CsDealsFeed {
-    return new CsDealsFeed(this.client.feedUrl(), options);
+  /** A self-correcting local copy of the book on its own socket. Not running until `start()`. */
+  createLiveBook(options: LiveBookOptions = {}): LiveBook {
+    const socket = this.createWebSocket({
+      ...options.socket,
+      events: BOOK_EVENTS,
+      ...(options.appId === undefined ? {} : { appIds: [options.appId] }),
+    });
+    const readBook = async () => {
+      const read = await this.market.getBook({ appId: options.appId });
+      if (read.notModified) throw new Error('GET /book answered 304 to a read without an etag');
+      return read.data;
+    };
+    return new LiveBook(socket, readBook, options);
   }
 
-  /** A self-syncing local copy of the active book (one socket + one `GET /book` per sync). */
-  async liveBook(options: LiveBookOptions & { feed?: FeedOptions } = {}): Promise<LiveBook> {
-    const book = new LiveBook(
-      this.feed(options.feed),
-      (appId) => this.market.book(appId !== undefined ? { app_id: appId } : {}),
-      options,
-    );
-    await book.start();
-    return book;
-  }
-
-  /** Escape hatch for routes this SDK does not model. GETs retry; writes never do. */
-  request<T = unknown>(method: HttpMethod, path: string, options?: CallOptions): Promise<T> {
-    return this.client.request<T>(method, path, options);
+  destroy(): void {
+    this.client.destroy();
   }
 }

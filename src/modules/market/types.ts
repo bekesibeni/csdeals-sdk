@@ -1,27 +1,14 @@
-import type {
-  AppIdParam,
-  BulkPageLimit,
-  Cents,
-  ConditionalParams,
-  IsoDateTime,
-  LeanListing,
-  ListingRow,
-  PageMetadata,
-  PageParams,
-  RequestOptions,
-} from "../../core/types.js";
-
-// ── Entities ──
+import type { LeanListing, ListingRow, PageMetadata, PageParams } from '../../core/types.js';
 
 export interface ListingsResponse {
   listings: ListingRow[];
-  /** Pass back as `cursor`; `null` once the book is exhausted. */
+  /** Pass back as `cursor`; null once the book is exhausted. */
   next_cursor: number | null;
   metadata: PageMetadata;
 }
 
 export interface Book {
-  /** The last WebSocket `seq` published before the snapshot. */
+  /** The last feed `seq` published before the snapshot. */
   seq: number;
   listings: LeanListing[];
 }
@@ -30,10 +17,10 @@ export interface PriceRow {
   app_id: number;
   market_hash_name: string;
   /** Steam-derived. */
-  market_price: Cents;
-  recommended_price: Cents;
-  lowest_listing_price: Cents | null;
-  updated_at: IsoDateTime | null;
+  market_price: number;
+  recommended_price: number;
+  lowest_listing_price: number | null;
+  updated_at: string | null;
 }
 
 export interface PricesResponse {
@@ -41,23 +28,23 @@ export interface PricesResponse {
   metadata: PageMetadata;
 }
 
-export interface PriceAllRow extends PriceRow {
+export interface AllPricesRow extends PriceRow {
   /** Units listed. */
   stock: number;
   listing_count: number;
 }
 
-export interface PricesAll {
-  prices: PriceAllRow[];
-  generated_at: IsoDateTime;
+export interface AllPrices {
+  prices: AllPricesRow[];
+  generated_at: string;
 }
 
 export interface Sale {
   app_id: number;
   market_hash_name: string;
-  price: Cents;
+  price: number;
   amount: number;
-  sold_at: IsoDateTime;
+  sold_at: string;
 }
 
 export interface SalesResponse {
@@ -68,7 +55,7 @@ export interface SalesResponse {
 export interface SaleAverage {
   app_id: number;
   market_hash_name: string;
-  average_price: Cents;
+  average_price: number;
   sales: number;
   volume: number;
 }
@@ -76,31 +63,30 @@ export interface SaleAverage {
 export interface SalesAverages {
   averages: SaleAverage[];
   window_days: number;
-  generated_at: IsoDateTime;
+  generated_at: string;
 }
 
-// ── Params ──
-
-export interface ListingsParams extends RequestOptions {
-  limit?: BulkPageLimit;
+export interface GetListingsParams {
+  appId?: number;
+  /** 500 or 1000. */
+  limit?: 500 | 1000;
   page?: number;
-  /** A listing id from a previous `next_cursor`. Stable through a churning book, unlike `page`. */
+  /** A previous `next_cursor`. Stable through a churning book, unlike `page`. */
   cursor?: number;
-  app_id?: AppIdParam;
 }
 
-export interface AppFilterParams extends RequestOptions {
-  app_id?: AppIdParam;
+export interface ConditionalParams {
+  appId?: number;
+  /** The `etag` of a previous read. */
+  etag?: string;
 }
 
-export interface ConditionalAppParams extends AppFilterParams, ConditionalParams {}
-
-export interface PricesParams extends PageParams, RequestOptions {
-  app_id?: AppIdParam;
+export interface GetPricesParams extends PageParams {
+  appId?: number;
 }
 
-export interface SalesParams extends PageParams, RequestOptions {
-  app_id?: AppIdParam;
-  /** Exact match, 1-200 characters. */
-  market_hash_name?: string;
+export interface GetSalesParams extends PageParams {
+  appId?: number;
+  /** Exact match. */
+  marketHashName?: string;
 }

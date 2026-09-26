@@ -1,136 +1,67 @@
-import { type CsDealsClient, pickRequestOptions } from "../../core/client.js";
-import { type IterateOptions, iterateCursor, iteratePages } from "../../core/paginate.js";
-import type { ConditionalResult, ListingRow, RequestOptions } from "../../core/types.js";
-import { assertOneOf, assertPositiveInt, assertText } from "../../core/validate.js";
+import type { CsDealsClient } from '../../core/client.js';
+import type { Conditional, ListingRow } from '../../core/types.js';
 import type {
+  AllPrices,
   Book,
-  ConditionalAppParams,
-  ListingsParams,
+  ConditionalParams,
+  GetListingsParams,
+  GetPricesParams,
+  GetSalesParams,
   ListingsResponse,
-  PriceRow,
-  PricesAll,
-  PricesParams,
   PricesResponse,
-  Sale,
   SalesAverages,
-  SalesParams,
   SalesResponse,
-} from "./types.js";
+} from './types.js';
 
-const BULK_READ = { timeoutMs: 120_000, maxResponseBytes: 256 * 1024 * 1024 };
+/** The whole-market reads are several MB. */
+const BULK_TIMEOUT_MS = 120_000;
 
 export function initMarketModule(client: CsDealsClient) {
-  const module = {
-    /** Active listings with full item detail, newest first. Metered at 1 request/second. */
-    async listings(params: ListingsParams = {}): Promise<ListingsResponse> {
-      assertOneOf(params.limit, [500, 1000] as const, "limit");
-      if (params.cursor !== undefined) assertPositiveInt(params.cursor, "cursor");
-      if (params.page !== undefined) assertPositiveInt(params.page, "page");
-      return client.get("/public/v1/listings", {
-        ...pickRequestOptions(params),
-        query: {
-          limit: params.limit ?? 1000,
-          page: params.page,
-          cursor: params.cursor,
-          app_id: params.app_id,
-        },
+  return {
+    /** Active listings with full item detail, newest first. 1 request/second. */
+    async getListings(params: GetListingsParams = {}): Promise<ListingsResponse> {
+      return client.get('listings', {
+        app_id: params.appId,
+        limit: params.limit ?? 1000,
+        page: params.page,
+        cursor: params.cursor,
       });
     },
 
-    /** One listing; `LISTING_NOT_FOUND` once sold or delisted. */
-    async listing(id: number, options?: RequestOptions): Promise<ListingRow> {
-      assertPositiveInt(id, "id");
-      return client.get(`/public/v1/listings/${id}`, pickRequestOptions(options));
+    /** One listing with `trade_locked_until`; 404 `LISTING_NOT_FOUND` once sold or delisted. */
+    async getListing(id: number): Promise<ListingRow> {
+      return client.get(`listings/${id}`);
     },
 
-    /** Every active listing plus the feed `seq` it is valid at. 6/min: for (re)syncing, not polling. */
-    async book(params: ConditionalAppParams = {}): Promise<ConditionalResult<Book>> {
-      return client.getConditional("/public/v1/book", {
-        ...BULK_READ,
-        ...pickRequestOptions(params),
-        etag: params.etag,
-        query: { app_id: params.app_id },
+    /** Every active listing plus the feed `seq` it is valid at. 6/min: for syncing, not polling. */
+    async getBook(params: ConditionalParams = {}): Promise<Conditional<Book>> {
+      return client.getConditional('book', { app_id: params.appId }, { etag: params.etag, timeout: BULK_TIMEOUT_MS });
+    },
+
+    async getPrices(params: GetPricesParams = {}): Promise<PricesResponse> {
+      return client.get('prices', { app_id: params.appId, page: params.page ?? 1, limit: params.limit ?? 100 });
+    },
+
+    /** Every price with stock and listing count, one cached response (60 s). */
+    async getAllPrices(params: ConditionalParams = {}): Promise<Conditional<AllPrices>> {
+      return client.getConditional('prices/all', { app_id: params.appId }, { etag: params.etag, timeout: BULK_TIMEOUT_MS });
+    },
+
+    /** Recent sales, newest first. 1 request per 5 seconds. */
+    async getSales(params: GetSalesParams = {}): Promise<SalesResponse> {
+      return client.get('sales', {
+        app_id: params.appId,
+        market_hash_name: params.marketHashName,
+        page: params.page ?? 1,
+        limit: params.limit ?? 100,
       });
     },
 
-    async prices(params: PricesParams = {}): Promise<PricesResponse> {
-      return client.get("/public/v1/prices", {
-        ...pickRequestOptions(params),
-        query: { page: params.page ?? 1, limit: params.limit ?? 100, app_id: params.app_id },
-      });
-    },
-
-    /** Every price in one cached response (60s, ETag). */
-    async pricesAll(params: ConditionalAppParams = {}): Promise<ConditionalResult<PricesAll>> {
-      return client.getConditional("/public/v1/prices/all", {
-        ...BULK_READ,
-        ...pickRequestOptions(params),
-        etag: params.etag,
-        query: { app_id: params.app_id },
-      });
-    },
-
-    /** Recent sales, newest first. Metered at 1 request per 5 seconds. */
-    async sales(params: SalesParams = {}): Promise<SalesResponse> {
-      if (params.market_hash_name !== undefined) assertText(params.market_hash_name, 1, 200, "market_hash_name");
-      return client.get("/public/v1/sales", {
-        ...pickRequestOptions(params),
-        query: {
-          page: params.page ?? 1,
-          limit: params.limit ?? 100,
-          app_id: params.app_id,
-          market_hash_name: params.market_hash_name,
-        },
-      });
-    },
-
-    /** 30-day volume-weighted average sale price per item (cached 10 min, ETag). */
-    async salesAverages(params: ConditionalAppParams = {}): Promise<ConditionalResult<SalesAverages>> {
-      return client.getConditional("/public/v1/sales/averages", {
-        ...BULK_READ,
-        ...pickRequestOptions(params),
-        etag: params.etag,
-        query: { app_id: params.app_id },
-      });
-    },
-
-    /** Walks the whole book by cursor, paced to the 1 request/second meter. */
-    iterateListings(
-      params: Omit<ListingsParams, "page" | "cursor"> = {},
-      options: IterateOptions & { startCursor?: number } = {},
-    ): AsyncGenerator<ListingRow, void, undefined> {
-      return iterateCursor(
-        (cursor) => module.listings({ ...params, cursor }),
-        (r) => r.listings,
-        (r) => r.next_cursor,
-        { minIntervalMs: 1_000, signal: params.signal, ...options },
-      );
-    },
-
-    iteratePrices(
-      params: Omit<PricesParams, "page"> = {},
-      options: IterateOptions = {},
-    ): AsyncGenerator<PriceRow, void, undefined> {
-      return iteratePages(
-        (page) => module.prices({ ...params, page }),
-        (r) => r.prices,
-        { minIntervalMs: 1_000, signal: params.signal, ...options },
-      );
-    },
-
-    /** Paced to the 1 request per 5 seconds meter. */
-    iterateSales(
-      params: Omit<SalesParams, "page"> = {},
-      options: IterateOptions = {},
-    ): AsyncGenerator<Sale, void, undefined> {
-      return iteratePages(
-        (page) => module.sales({ ...params, page }),
-        (r) => r.sales,
-        { minIntervalMs: 5_000, signal: params.signal, ...options },
-      );
+    /** 30-day volume-weighted average sale price per item (cached 10 min). */
+    async getSalesAverages(params: ConditionalParams = {}): Promise<Conditional<SalesAverages>> {
+      return client.getConditional('sales/averages', { app_id: params.appId }, { etag: params.etag, timeout: BULK_TIMEOUT_MS });
     },
   };
-  return module;
 }
 
-export * from "./types.js";
+export * from './types.js';

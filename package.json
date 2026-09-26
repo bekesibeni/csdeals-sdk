@@ -1,7 +1,7 @@
 {
   "name": "csdeals-sdk",
-  "version": "0.1.0",
-  "description": "TypeScript SDK for the CS Deals (cs.deals) public v1 API",
+  "version": "0.2.0",
+  "description": "A TypeScript SDK for the CS Deals (cs.deals) public v1 API (market, trading, listing feed, webhooks)",
   "author": "benji",
   "license": "Proprietary",
   "homepage": "https://github.com/bekesibeni/csdeals-sdk#readme",
@@ -42,8 +42,16 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
     "tsdown": "^0.22.0",
     "typescript": "^6.0.3",
     "vitest": "^5.0.1"
+  },
+  "dependencies": {
+    "@benji/stdlib": "github:bekesibeni/node-stdlib",
+    "http-proxy-agent": "^9.1.0",
+    "https-proxy-agent": "^9.1.0",
+    "socks-proxy-agent": "^10.1.0",
+    "ws": "^8.21.3"
   }
 }

@@ -1,402 +1,160 @@
-import { CsDealsError, keyForCode } from "./errors.js";
-import type { ConditionalResult, RateLimitInfo, RequestOptions } from "./types.js";
-
-export const SDK_VERSION = "0.1.0";
-export const DEFAULT_BASE_URL = "https://api.cs.deals";
-
-const DEFAULT_TIMEOUT_MS = 15_000;
-const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
-const DEFAULT_MAX_RETRY_DELAY_MS = 10_000;
-
-export type HttpMethod = "GET" | "POST" | "PATCH";
-
-export type QueryValue = string | number | boolean | null | undefined;
-export type Query = Record<string, QueryValue>;
-
-export interface CallOptions extends RequestOptions {
-  query?: Query;
-  body?: unknown;
-  /** Sent as `If-None-Match`. */
-  etag?: string;
-  maxResponseBytes?: number;
-}
+import { HttpClient } from '@benji/stdlib/http.js';
+import type { HttpClientOptions, HttpResponse } from '@benji/stdlib/http.js';
+import { Agent as NodeHttpAgent } from 'node:http';
+import type { Agent as HttpAgent } from 'node:http';
+import { Agent as NodeHttpsAgent } from 'node:https';
+import type { Agent as HttpsAgent } from 'node:https';
+import { HttpProxyAgent } from 'http-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { CsDealsApiError } from './errors.js';
+import type { Conditional } from './types.js';
 
 export interface CsDealsClientOptions {
   /** `csd_...`, sent as `Authorization: Bearer`. */
   apiKey: string;
-  /** Defaults to production; must be https. */
+  /** Default `https://api.cs.deals/public/v1`. */
   baseUrl?: string;
-  timeoutMs?: number;
-  /** Retries apply to GETs only. A write is never resent: cs.deals has no idempotency key. */
-  maxRetries?: number;
-  /** A `Retry-After` longer than this is thrown to the caller instead of slept through. */
-  maxRetryDelayMs?: number;
-  maxResponseBytes?: number;
-  fetch?: typeof globalThis.fetch;
-  /** Called with the `X-RateLimit-*` budget after every response that carries it. */
-  onRateLimit?: (info: RateLimitInfo) => void;
-  userAgent?: string;
+  /** Default `wss://api.cs.deals/public/v1/ws`. */
+  wsUrl?: string;
+  /** Request timeout in ms. Default 30 000; the whole-book reads raise their own. */
+  timeout?: number;
+  /** `socks5://`, `http://` or `https://` proxy URL; a bare `host:port` is treated as SOCKS5. */
+  proxy?: string;
 }
 
-interface RawResponse {
-  status: number;
-  headers: Headers;
-  text: string;
-}
+export const DEFAULT_BASE_URL = 'https://api.cs.deals/public/v1';
+export const DEFAULT_WS_URL = 'wss://api.cs.deals/public/v1/ws';
+const DEFAULT_TIMEOUT_MS = 30_000;
+const SDK_VERSION = '0.2.0';
 
-export function pickRequestOptions(options: RequestOptions | undefined): RequestOptions {
-  const out: RequestOptions = {};
-  if (options?.signal) out.signal = options.signal;
-  if (options?.timeoutMs !== undefined) out.timeoutMs = options.timeoutMs;
-  return out;
-}
+type QueryValue = string | number | boolean | null | undefined;
+export type Query = Record<string, QueryValue>;
+export type Body = Record<string, unknown>;
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function assertHttps(value: string, what: string): string {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new CsDealsError({ key: "NOT_CONFIGURED", status: 0, message: `Invalid ${what}` });
-  }
-  if (url.protocol !== "https:" || url.username || url.password) {
-    throw new CsDealsError({
-      key: "NOT_CONFIGURED",
-      status: 0,
-      message: `${what} must be a plain https URL`,
-    });
-  }
-  return url.toString().replace(/\/+$/, "");
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new CsDealsError({ key: "NETWORK_ERROR", status: 0, message: "Aborted" }));
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new CsDealsError({ key: "NETWORK_ERROR", status: 0, message: "Aborted" }));
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function parseRetryAfter(value: string | null): number | null {
-  if (!value) return null;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
-  const date = Date.parse(value);
-  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
-}
-
-function headerInt(headers: Headers, name: string): number | null {
-  const raw = headers.get(name);
-  if (raw === null || raw.trim() === "") return null;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : null;
-}
-
-export function buildQuery(query: Query | undefined): string {
-  if (!query) return "";
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null) continue;
-    params.set(key, String(value));
-  }
-  const text = params.toString();
-  return text ? `?${text}` : "";
-}
-
-export function parseJson(text: string, status: number, method: string, path: string): unknown {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new CsDealsError({
-      key: "INVALID_RESPONSE",
-      status,
-      method,
-      path,
-      message: `cs.deals ${method} ${path} returned a non-JSON body`,
-    });
-  }
-}
-
-async function readBoundedText(response: Response, maxBytes: number, context: string): Promise<string> {
-  const tooLarge = () =>
-    new CsDealsError({
-      key: "INVALID_RESPONSE",
-      status: response.status,
-      message: `cs.deals ${context} response exceeds ${maxBytes} bytes`,
-    });
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge();
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let total = 0;
-  let text = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw tooLarge();
-    }
-    text += decoder.decode(value, { stream: true });
-  }
-  return text + decoder.decode();
-}
-
-function toHttpError(status: number, headers: Headers, text: string, method: string, path: string): CsDealsError {
-  let payload: unknown = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = null;
-  }
-  const body = isRecord(payload) ? payload : {};
-  const providerCode = typeof body.error === "string" ? body.error : null;
-  const data = isRecord(body.data) ? body.data : null;
-  const providerMessage = typeof body.message === "string" ? body.message : null;
-
-  let key = keyForCode(providerCode);
-  if (key === "UNKNOWN") {
-    if (status === 401) key = "UNAUTHORIZED";
-    else if (status === 403) key = "FORBIDDEN";
-    else if (status === 404) key = "NOT_FOUND";
-    else if (status === 429) key = "RATE_LIMITED";
-    else if (status === 400 || status === 422) key = "INVALID_REQUEST";
-  }
-
-  return new CsDealsError({
-    key,
-    status,
-    providerCode,
-    data,
-    retryAfterMs: parseRetryAfter(headers.get("retry-after")),
-    method,
-    path,
-    message:
-      providerMessage ??
-      `cs.deals ${method} ${path} failed with ${status}${providerCode ? ` ${providerCode}` : ""}`,
-  });
+interface Agents {
+  http: HttpAgent;
+  https: HttpsAgent;
 }
 
 export class CsDealsClient {
   readonly baseUrl: string;
+  readonly wsUrl: string;
+  readonly userAgent: string;
   private readonly apiKey: string;
-  private readonly timeoutMs: number;
-  private readonly maxRetries: number;
-  private readonly maxRetryDelayMs: number;
-  private readonly maxResponseBytes: number;
-  private readonly fetchImpl: typeof globalThis.fetch;
-  private readonly onRateLimit: ((info: RateLimitInfo) => void) | undefined;
-  private readonly userAgent: string;
+  private readonly http: HttpClient;
+  private readonly agents: Agents;
 
-  constructor(options: CsDealsClientOptions) {
-    const apiKey = options.apiKey?.trim() ?? "";
-    if (!apiKey) {
-      throw new CsDealsError({ key: "NOT_CONFIGURED", status: 0, message: "CsDeals requires an apiKey" });
-    }
+  constructor({ apiKey, baseUrl = DEFAULT_BASE_URL, wsUrl = DEFAULT_WS_URL, timeout = DEFAULT_TIMEOUT_MS, proxy }: CsDealsClientOptions) {
+    if (!apiKey) throw new Error('CsDealsClient: apiKey is required');
     this.apiKey = apiKey;
-    this.baseUrl = assertHttps(options.baseUrl ?? DEFAULT_BASE_URL, "baseUrl");
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.maxRetries = Math.max(0, options.maxRetries ?? 2);
-    this.maxRetryDelayMs = options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
-    this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
-    this.onRateLimit = options.onRateLimit;
-    this.userAgent = options.userAgent ?? `csdeals-sdk/${SDK_VERSION}`;
-  }
+    this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    this.wsUrl = wsUrl;
+    this.userAgent = `csdeals-sdk/${SDK_VERSION} (+https://github.com/bekesibeni/csdeals-sdk)`;
+    this.agents = proxy ? buildProxyAgents(proxy) : buildDirectAgents();
 
-  /** The WebSocket feed URL with the key as `api_key`, since a WHATWG WebSocket cannot set headers. */
-  feedUrl(): string {
-    const url = new URL(`${this.baseUrl}/public/v1/ws`);
-    url.protocol = "wss:";
-    url.searchParams.set("api_key", this.apiKey);
-    return url.toString();
-  }
-
-  async get<T>(path: string, options: CallOptions = {}): Promise<T> {
-    return this.json<T>("GET", path, options);
-  }
-
-  async post<T>(path: string, body: unknown, options: CallOptions = {}): Promise<T> {
-    return this.json<T>("POST", path, { ...options, body });
-  }
-
-  async patch<T>(path: string, body: unknown, options: CallOptions = {}): Promise<T> {
-    return this.json<T>("PATCH", path, { ...options, body });
-  }
-
-  async getText(path: string, options: CallOptions = {}): Promise<string> {
-    const raw = await this.execute("GET", path, options);
-    return raw.text;
-  }
-
-  async getConditional<T>(path: string, options: CallOptions = {}): Promise<ConditionalResult<T>> {
-    const raw = await this.execute("GET", path, options);
-    if (raw.status === 304) {
-      return { notModified: true, etag: raw.headers.get("etag") ?? options.etag ?? "" };
-    }
-    return {
-      notModified: false,
-      etag: raw.headers.get("etag"),
-      data: this.decode<T>(raw, "GET", path),
+    const httpOptions: HttpClientOptions = {
+      defaultHeaders: {
+        Accept: 'application/json',
+        'User-Agent': this.userAgent,
+        Authorization: `Bearer ${apiKey}`,
+      },
+      defaultTimeout: timeout,
+      gzip: true,
+      httpAgent: this.agents.http,
+      httpsAgent: this.agents.https,
     };
+    this.http = new HttpClient(httpOptions);
   }
 
-  /** Escape hatch for routes this SDK does not model. GETs retry; writes never do. */
-  async request<T = unknown>(method: HttpMethod, path: string, options: CallOptions = {}): Promise<T> {
-    return this.json<T>(method, path, options);
+  /** Agent for the WebSocket, so it egresses exactly like REST. */
+  get wsAgent(): HttpAgent {
+    return this.wsUrl.startsWith('ws:') ? this.agents.http : this.agents.https;
   }
 
-  private async json<T>(method: HttpMethod, path: string, options: CallOptions): Promise<T> {
-    const raw = await this.execute(method, path, options);
-    return this.decode<T>(raw, method, path);
+  /** What the socket's upgrade request carries. */
+  requestHeaders(): Record<string, string> {
+    return { Authorization: `Bearer ${this.apiKey}`, 'User-Agent': this.userAgent };
   }
 
-  private decode<T>(raw: RawResponse, method: string, path: string): T {
-    const value = parseJson(raw.text, raw.status, method, path);
-    if (value !== null && typeof value === "object") return value as T;
-    if (value === null && raw.status === 204) return value as T;
-    throw new CsDealsError({
-      key: "INVALID_RESPONSE",
-      status: raw.status,
+  /** Destroys the agents so one-off scripts can exit immediately. Safe to call repeatedly. */
+  destroy(): void {
+    try {
+      this.agents.http.destroy();
+    } finally {
+      this.agents.https.destroy();
+    }
+  }
+
+  async get<T>(path: string, query?: Query, timeout?: number): Promise<T> {
+    const response = await this.send('GET', path, { query, timeout });
+    return unwrap<T>(response);
+  }
+
+  /** `get` with `If-None-Match`: an unchanged resource comes back as `notModified` rather than a body. */
+  async getConditional<T>(path: string, query?: Query, options: { etag?: string | undefined; timeout?: number } = {}): Promise<Conditional<T>> {
+    const response = await this.send('GET', path, {
+      query,
+      timeout: options.timeout,
+      headers: options.etag ? { 'If-None-Match': options.etag } : undefined,
+    });
+    const etag = typeof response.headers.etag === 'string' ? response.headers.etag : undefined;
+    if (response.statusCode === 304) return { notModified: true, etag: etag ?? options.etag };
+    return { notModified: false, etag, data: unwrap<T>(response) };
+  }
+
+  async post<T>(path: string, body: Body, timeout?: number): Promise<T> {
+    return unwrap<T>(await this.send('POST', path, { body, timeout }));
+  }
+
+  async patch<T>(path: string, body: Body, timeout?: number): Promise<T> {
+    return unwrap<T>(await this.send('PATCH', path, { body, timeout }));
+  }
+
+  private send(
+    method: string,
+    path: string,
+    options: { query?: Query | undefined; body?: Body; timeout?: number | undefined; headers?: Record<string, string> | undefined },
+  ): Promise<HttpResponse> {
+    const url = new URL(path.replace(/^\/+/, ''), this.baseUrl);
+    for (const [key, value] of Object.entries(options.query ?? {})) {
+      if (value !== undefined && value !== null) url.searchParams.append(key, String(value));
+    }
+    return this.http.request({
       method,
-      path,
-      message: `cs.deals ${method} ${path} returned no JSON object`,
+      url: url.toString(),
+      ...(options.headers ? { headers: options.headers } : {}),
+      ...(options.body ? { json: options.body } : {}),
+      ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
     });
   }
+}
 
-  private async execute(method: HttpMethod, path: string, options: CallOptions): Promise<RawResponse> {
-    const attempts = method === "GET" ? this.maxRetries + 1 : 1;
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await this.once(method, path, options);
-      } catch (err) {
-        if (!(err instanceof CsDealsError) || !err.retryable || attempt >= attempts - 1) throw err;
-        const delay = err.retryAfterMs ?? Math.min(2 ** attempt * 250, 4_000);
-        if (delay > this.maxRetryDelayMs) throw err;
-        await sleep(delay, options.signal);
-      }
-    }
+function unwrap<T>(response: HttpResponse): T {
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new CsDealsApiError(response.statusCode, response.jsonBody ?? null, parseRetryAfter(response.headers['retry-after']));
   }
+  return response.jsonBody as T;
+}
 
-  private async once(method: HttpMethod, path: string, options: CallOptions): Promise<RawResponse> {
-    const cleanPath = `/${path.replace(/^\/+/, "")}`;
-    const url = `${this.baseUrl}${cleanPath}${buildQuery(options.query)}`;
-    const headers: Record<string, string> = {
-      accept: "application/json",
-      authorization: `Bearer ${this.apiKey}`,
-      "user-agent": this.userAgent,
-    };
-    let body: string | undefined;
-    if (method !== "GET") {
-      headers["content-type"] = "application/json";
-      body = JSON.stringify(options.body ?? {});
-    }
-    if (options.etag) headers["if-none-match"] = options.etag;
+/** `Retry-After` is either delta-seconds or an HTTP date. */
+function parseRetryAfter(value: string | string[] | undefined): number | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds);
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : null;
+}
 
-    const timeoutMs = options.timeoutMs ?? this.timeoutMs;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const onOuterAbort = () => controller.abort();
-    options.signal?.addEventListener("abort", onOuterAbort, { once: true });
+function buildDirectAgents(): Agents {
+  return { http: new NodeHttpAgent({ keepAlive: true }), https: new NodeHttpsAgent({ keepAlive: true }) };
+}
 
-    try {
-      let response: Response;
-      try {
-        response = await this.fetchImpl(url, {
-          method,
-          headers,
-          ...(body !== undefined ? { body } : {}),
-          redirect: "error",
-          signal: controller.signal,
-        });
-      } catch (err) {
-        if (controller.signal.aborted && !options.signal?.aborted) {
-          throw new CsDealsError({
-            key: "TIMEOUT",
-            status: 0,
-            method,
-            path: cleanPath,
-            message: `cs.deals ${method} ${cleanPath} timed out after ${timeoutMs}ms`,
-          });
-        }
-        throw new CsDealsError({
-          key: "NETWORK_ERROR",
-          status: 0,
-          method,
-          path: cleanPath,
-          message: (err as Error)?.message ?? `cs.deals ${method} ${cleanPath} failed`,
-        });
-      }
-
-      this.reportRateLimit(method, cleanPath, response.headers);
-      if (response.status === 304) return { status: 304, headers: response.headers, text: "" };
-
-      let text: string;
-      try {
-        text = await readBoundedText(
-          response,
-          options.maxResponseBytes ?? this.maxResponseBytes,
-          `${method} ${cleanPath}`,
-        );
-      } catch (err) {
-        if (err instanceof CsDealsError) throw err;
-        throw new CsDealsError({
-          key: controller.signal.aborted && !options.signal?.aborted ? "TIMEOUT" : "NETWORK_ERROR",
-          status: response.ok ? 0 : response.status,
-          method,
-          path: cleanPath,
-          message: (err as Error)?.message ?? `cs.deals ${method} ${cleanPath} body read failed`,
-        });
-      }
-
-      if (!response.ok) throw toHttpError(response.status, response.headers, text, method, cleanPath);
-      return { status: response.status, headers: response.headers, text };
-    } catch (err) {
-      if (err instanceof CsDealsError && err.method === null) {
-        throw new CsDealsError({
-          key: err.key,
-          status: err.status,
-          providerCode: err.providerCode,
-          data: err.data,
-          retryAfterMs: err.retryAfterMs,
-          method,
-          path: cleanPath,
-          message: err.message,
-        });
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onOuterAbort);
-    }
+function buildProxyAgents(proxy: string): Agents {
+  const proxyUrl = /^(https?|socks5h?):\/\//.test(proxy) ? proxy : `socks5://${proxy}`;
+  if (proxyUrl.startsWith('socks5')) {
+    return { http: new SocksProxyAgent(proxyUrl), https: new SocksProxyAgent(proxyUrl) };
   }
-
-  private reportRateLimit(method: string, path: string, headers: Headers): void {
-    if (!this.onRateLimit) return;
-    const limit = headerInt(headers, "x-ratelimit-limit");
-    const remaining = headerInt(headers, "x-ratelimit-remaining");
-    if (limit === null || remaining === null) return;
-    const reset = headerInt(headers, "x-ratelimit-reset");
-    try {
-      this.onRateLimit({ method, path, limit, remaining, resetAt: reset === null ? null : reset * 1_000 });
-    } catch {
-      // A throwing observer must not fail the request it is observing.
-    }
-  }
+  return { http: new HttpProxyAgent(proxyUrl), https: new HttpsProxyAgent(proxyUrl) };
 }

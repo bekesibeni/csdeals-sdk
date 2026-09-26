@@ -1,261 +1,262 @@
 # csdeals-sdk
 
-TypeScript SDK for the [CS Deals](https://cs.deals/docs) public v1 API (`api.cs.deals`): market data,
-buying, selling, withdrawing to Steam, account history, crypto cashouts, signed webhooks and the
-listing WebSocket feed.
-
-Server-to-server. ESM-only. Node 24+. Zero runtime dependencies (native `fetch` and `WebSocket`).
+A TypeScript SDK for the [CS Deals](https://cs.deals/docs) public v1 API: market data, buying,
+selling, withdrawing to Steam, account history, crypto cashouts, signed webhooks and the listing feed.
 
 ```bash
 pnpm add github:bekesibeni/csdeals-sdk
 ```
 
-`dist/` is not committed; the package builds itself on install via `prepare`. pnpm 11 needs it
-allowlisted in the consuming repo's `pnpm-workspace.yaml`:
+`dist/` is not committed, so pnpm builds the package on install. pnpm 11 needs it, and its
+`@benji/stdlib` git dependency, in the consuming repo's `allowBuilds`. The bare name covers the
+build-script gate, the exact `name@<resolved-spec>` keys cover the git-dep prepare gate. The install
+error prints the exact key to paste:
 
 ```yaml
 allowBuilds:
   csdeals-sdk: true
+  'csdeals-sdk@git+ssh://git@github.com/bekesibeni/csdeals-sdk.git#<sha>': true
+  'csdeals-sdk@git+https://git@github.com:bekesibeni/csdeals-sdk.git#<sha>': true
+  '@doctormckay/stdlib': true
+  '@doctormckay/stdlib@https://codeload.github.com/bekesibeni/node-stdlib/tar.gz/<sha>': true
 ```
 
-## Features
-
-- ✅ Every documented REST route, typed field for field against the OpenAPI schema
-- ✅ Wire-native shapes: `snake_case`, integer cents, exactly what the docs show
-- ✅ One typed error class, every documented error code
-- ✅ Reads retry with backoff and honour `Retry-After`; writes are never resent
-- ✅ Pre-flight validation, so a malformed request never spends a rate-limited call
-- ✅ Page and cursor iterators paced to each route's meter
-- ✅ Webhook signature verification (constant time, replay window)
-- ✅ WebSocket feed with per-listing `seq` ordering, auto-reconnect, and a self-syncing `LiveBook`
-- ✅ ETag support on the cached bulk reads
-
-## Quick Start
-
 ```ts
-import { APP_ID, CsDealsSDK } from 'csdeals-sdk';
+import { AppId, CsDealsSDK } from 'csdeals-sdk';
 
 const sdk = new CsDealsSDK({
   apiKey: process.env.CSDEALS_API_KEY!,             // csd_...
-  webhookSecret: process.env.CSDEALS_WEBHOOK_SECRET, // whsec_..., enables sdk.verifyWebhook
+  webhookSecret: process.env.CSDEALS_WEBHOOK_SECRET, // whsec_..., only needed to verify webhooks
+  proxy: 'socks5://user:pass@host:port',            // optional
 });
 
-const { balance } = await sdk.account.user();        // cents
+const { balance } = await sdk.account.getUser();     // cents
 
-const { listings } = await sdk.market.listings({ app_id: APP_ID.CS2, limit: 500 });
-const pick = listings[0]!;
+const { listings } = await sdk.market.getListings({ appId: AppId.Rust, limit: 500 });
+const order = await sdk.trading.purchase([
+  { listingId: listings[0].id, amount: 1, maxPrice: listings[0].price },
+]);
 
-const order = await sdk.trading.purchase({
-  items: [{ listing_id: pick.id, amount: 1, max_price: pick.price }],
-});
+const { items } = await sdk.trading.getBackpack({ appId: AppId.Rust });
+await sdk.trading.withdraw({ items: items.map(({ id, amount }) => ({ id, amount })) });
 
-const backpack = await sdk.trading.backpack({ app_id: APP_ID.CS2 });
-await sdk.trading.withdraw({ items: backpack.items.map(({ id, amount }) => ({ id, amount })) });
+sdk.destroy();
 ```
 
-## Modules
+Every price, balance and amount is an **integer in cents** (`4250` = $42.50), both ways. Params are
+camelCase; responses are the wire shape, `snake_case`, exactly what the docs show.
 
-### Market (`sdk.market`)
+## Things that will bite you
 
-```ts
-sdk.market.listings({ limit?: 500 | 1000, page?, cursor?, app_id? })  // 1 req/s, full item detail
-sdk.market.listing(id)                                                // LISTING_NOT_FOUND once gone
-sdk.market.book({ app_id?, etag? })                                   // every active listing + seq, 6/min
-sdk.market.prices({ page?, limit?, app_id? })
-sdk.market.pricesAll({ app_id?, etag? })                              // one cached response, start here
-sdk.market.sales({ page?, limit?, app_id?, market_hash_name? })       // 1 req / 5 s
-sdk.market.salesAverages({ app_id?, etag? })                          // 30-day volume-weighted
-sdk.market.iterateListings({ app_id }) / iteratePrices() / iterateSales()
-```
+**A purchase has no idempotency key.** Sending the same order twice buys twice, so the SDK never
+resends anything and neither should you. On a timeout or a 5xx, read the outcome back before trying
+again: `account.getOrders()` or `trading.getBackpack()` for a purchase, `trading.getTrades()` for a
+withdraw, deposit or sale.
 
-### Trading (`sdk.trading`)
+**`maxPrice` is a ceiling, not a price.** A cheaper listing fills at its current price, a dearer one
+fails the order with `LISTING_PRICE_CHANGED`. `trading.purchase` throws `PurchaseMismatchError`
+(carrying the `order`) when what came back charged more than the lines allowed, charged any copy
+above the highest `maxPrice`, or holds a different number of copies than requested. The order has
+already been placed by then: the error is there so it never passes as the one you asked for.
 
-```ts
-sdk.trading.purchase({ items: [{ listing_id, amount, max_price, private_token? }] })  // atomic
-sdk.trading.backpack({ page?, limit?, app_id?, search? })
-sdk.trading.deposit({ items: [{ token, amount }] })        // Steam -> backpack, unlisted
-sdk.trading.withdraw({ items: [{ id, amount }], two_factor_auth_token? })
-sdk.trading.trades({ page?, limit?: 500 | 1000, status? })  // 1 req/s
-sdk.trading.iterateTrades() / iterateBackpack()
-```
-
-### Selling (`sdk.selling`)
+**A withdraw only goes to the Steam account linked to the key.** There is no trade URL parameter.
+An item still inside its trade hold fails the whole call with `ITEM_TRADE_LOCKED`, and more than 50
+items fails it with `WITHDRAW_ITEM_LIMIT`, so filter and chunk:
 
 ```ts
-sdk.selling.steamInventory({ app_id })                     // tokens valid 30 min, 5/min
-sdk.selling.sell({ listings: [{ items: [{ token, amount }], price }] })
-sdk.selling.list({ listings: [{ items: [{ id, amount }], price }] })   // or price_decay
-sdk.selling.editListing({ listing_id, price?, price_decay?, amount? })
-sdk.selling.editListings([...])                             // up to 50, per-listing results
-sdk.selling.delist(listingId) / delistMany([ids])
-sdk.selling.myListings({ page?, limit?, app_id?, status? })
-sdk.selling.myListingsValue({ app_id? })
-sdk.selling.iterateMyListings()
-```
-
-`editListing` semantics come from the API, and the difference matters:
-
-| Sent | Effect |
-|---|---|
-| `price` | Reprices the whole stack in place |
-| `amount` | Grows the listing from the backpack, or shrinks it and returns the surplus |
-| `amount` + `price` | **Partial reprice**: this listing keeps `amount` at the new price, the rest moves to a new listing at the old price. Happens even when the price is unchanged |
-
-A price updater should send `price` only.
-
-### Account (`sdk.account`)
-
-```ts
-sdk.account.apiInfo()                  // GET /public/v1, unauthenticated
-sdk.account.verifyKey()                // true | false
-sdk.account.user()                     // { id, steam_id, name, balance }
-sdk.account.orders({ page?, limit? })
-sdk.account.exportOrders({ side?, app_id?, from?, to? })     // typed JSON rows
-sdk.account.exportOrdersCsv({ side?, app_id?, from?, to? })  // CSV text
-sdk.account.transactions({ page?, limit?, action? })
-sdk.account.cryptoWithdraw({ amount, ticker, address, fee_level?, two_factor_auth_token? })
-sdk.account.cryptoWithdrawal(id)
-sdk.account.iterateOrders() / iterateTransactions()
-```
-
-## Money
-
-Every price, balance and amount is an **integer in cents** (`4250` = $42.50), both ways. The SDK
-refuses a non-integer where the API wants cents, so dollars passed by mistake fail before the
-network instead of buying at a hundredth of the intended price. `formatUsdCents` and
-`parseUsdCents` convert at your display boundary. The one exception is `CryptoWithdrawal.token_amount`,
-which is in the crypto's own units.
-
-## Error Handling
-
-Every failure is a `CsDealsError`. Branch on `key`, and log `providerCode` (the raw `error` string)
-and `data`:
-
-```ts
-import { CsDealsError, isError } from 'csdeals-sdk';
-
-try {
-  await sdk.trading.purchase({ items });
-} catch (e) {
-  if (isError(e, 'LISTING_OUT_OF_STOCK') || isError(e, 'LISTING_PRICE_CHANGED')) {
-    const lost = e.data?.listing_ids;   // losing a race is normal; drop these and move on
-  } else if (e instanceof CsDealsError && e.ambiguous) {
-    // Timeout, dropped socket or 5xx on a write: it may have gone through. Read it back.
-  } else throw e;
+const now = Date.now();
+const ready = items.filter((i) => !i.trade_locked_until || Date.parse(i.trade_locked_until) <= now);
+for (let i = 0; i < ready.length; i += 50) {
+  const { withdraw_ids } = await sdk.trading.withdraw({
+    items: ready.slice(i, i + 50).map(({ id, amount }) => ({ id, amount })),
+  });
 }
 ```
 
-- `key`: one of the documented codes (`LISTING_PRICE_CHANGED`, `INSUFFICIENT_BALANCE`,
-  `ACTIVE_TRADE_LIMIT`, `WITHDRAW_DAILY_LIMIT_EXCEEDED`, ...), or a synthetic one: `UNAUTHORIZED`,
-  `FORBIDDEN`, `NOT_FOUND`, `RATE_LIMITED`, `TIMEOUT`, `NETWORK_ERROR`, `INVALID_RESPONSE`,
-  `INVALID_REQUEST` (refused before sending), `NOT_CONFIGURED`, `UNKNOWN`.
-- `retryable`: transport failure, 408/429/5xx, or a site-wide pause.
-- `ambiguous`: **a write that may have landed.** cs.deals has no idempotency key, so the SDK never
-  resends a write, and neither should you until you have read the outcome back:
+**The feed misses events.** CS Deals says so, and the documented fix is to re-read `GET /book`.
+`LiveBook` does that on start, after every reconnect and on an interval. Anything built on the raw
+socket alone drifts.
 
-| Write | Where to look |
-|---|---|
-| `purchase` | `account.orders()` (`side: "bought"`) or `trading.backpack()` |
-| `withdraw` / `deposit` / `sell` | `trading.trades()`: a new `withdraw_id` / `deposit_id` |
-| `cryptoWithdraw` | `account.transactions({ action: "WITHDRAWAL" })` |
-| `list` / `editListing` / `delist` | `selling.myListings()` |
+**Deduplicate webhooks on the body `id`, not the `X-CSDeals-Delivery` header.** Both are stable
+across retries, but only the body is signed: a replayed body with a fresh header would otherwise
+pass as new.
 
-## Webhooks
+## API
 
-Register the URL under **Settings → Developer** on the site; there is no API for it. The secret
-(`whsec_...`) is derived from the API key, so rerolling the key rotates it.
+`sdk.market`
+
+| Method | Endpoint |
+| --- | --- |
+| `getListings({ appId, limit, page, cursor })` | `GET /listings`, full item detail, pages of 500 or 1000 |
+| `getListing(id)` | `GET /listings/{id}`, `LISTING_NOT_FOUND` once gone |
+| `getBook({ appId, etag })` | `GET /book`, every active listing plus `seq`, ETag-aware |
+| `getPrices({ appId, page, limit })` | `GET /prices` |
+| `getAllPrices({ appId, etag })` | `GET /prices/all`, one cached response, ETag-aware |
+| `getSales({ appId, marketHashName, page, limit })` | `GET /sales` |
+| `getSalesAverages({ appId, etag })` | `GET /sales/averages`, 30-day volume-weighted |
+
+The ETag-aware reads return `{ notModified: false, etag, data }`, or `{ notModified: true, etag }`
+on a 304.
+
+`sdk.trading`
+
+| Method | Endpoint |
+| --- | --- |
+| `purchase(lines)` | `POST /purchase`, atomic: every line fills or none does |
+| `getBackpack({ appId, search, page, limit })` | `GET /backpack` |
+| `withdraw({ items, twoFactorToken })` | `POST /withdraw`, backpack to the linked Steam account |
+| `deposit(items)` | `POST /deposit`, Steam to backpack, unlisted |
+| `getTrades({ status, page, limit })` | `GET /trades` |
+
+`sdk.selling`
+
+| Method | Endpoint |
+| --- | --- |
+| `getSteamInventory(appId)` | `GET /steam-inventory`, tokens valid 30 minutes |
+| `sell(groups)` | `POST /sell`, Steam items straight to listings |
+| `list(groups)` | `POST /list`, backpack items to listings, fixed price or `priceDecay` |
+| `editListing(change)` / `editListings(changes)` | `PATCH /list`, one or up to 50 |
+| `delist(id)` / `delistMany(ids)` | `POST /delist`, one or up to 50, items return to the backpack |
+| `getMyListings({ appId, status, page, limit })` | `GET /my-listings` |
+| `getMyListingsValue(appId?)` | `GET /my-listings/value` |
+
+`editListing` does different things depending on what is sent:
+
+| Sent | Effect |
+| --- | --- |
+| `price` | Reprices the whole stack in place |
+| `amount` | Grows the listing from the backpack, or shrinks it and returns the surplus |
+| `amount` + `price` | **Partial reprice**: this listing keeps `amount` at the new price, the rest moves to a new listing at the old price, even when the price is unchanged |
+
+A price updater should send `price` only.
+
+`sdk.account`
+
+| Method | Endpoint |
+| --- | --- |
+| `getUser()` | `GET /user`, `{ id, steam_id, name, balance }` |
+| `getOrders({ page, limit })` | `GET /orders` |
+| `exportOrders({ side, appId, from, to })` | `GET /orders/export`, JSON rows |
+| `getTransactions({ action, page, limit })` | `GET /transactions` |
+| `cryptoWithdraw({ amount, ticker, address, twoFactorToken })` | `POST /crypto-withdraw` |
+| `getCryptoWithdrawal(id)` | `GET /crypto-withdraw/{id}` |
+
+`sdk.webhooks`: `verify(rawBody, headers)` and `parse(rawBody)`. The standalone
+`verifyWebhookSignature(rawBody, headers, secret)` needs no SDK instance.
 
 ```ts
-// Fastify: register the route with a raw body (e.g. fastify-raw-body).
 app.post('/webhooks/csdeals', { config: { rawBody: true } }, async (req, reply) => {
-  const hook = sdk.verifyWebhook(req.rawBody!, req.headers);   // throws UNAUTHORIZED on a bad signature
-  if (await seen(hook.deliveryId)) return reply.send();        // retries reuse the delivery id
-  if (hook.trade) await queue.add('csdeals-trade', hook.trade);
-  return reply.send();                                         // any 2xx within 10 s
+  if (!sdk.webhooks.verify(req.rawBody!, req.headers)) return reply.code(401).send();
+  const delivery = sdk.webhooks.parse(req.rawBody!);
+  if (await seen(delivery.id)) return reply.send();
+  await queue.add('csdeals-trade', delivery.data);
+  return reply.send();
 });
 ```
 
 - The signature is `sha256=hex(HMAC_SHA256(secret, "<X-CSDeals-Timestamp>.<raw body>"))`, with the
-  whole `whsec_...` string as the key. Pass the **raw** bytes: a re-serialised body will not verify.
+  whole `whsec_...` string as the key, compared in constant time, with a 300-second replay window.
+  Pass the **raw** bytes: a re-serialised body will not verify.
+- Answer any 2xx within 10 seconds. A failed delivery is retried up to 6 times, then dropped.
+  After 20 dropped deliveries in a row the URL is removed from the account, so `getTrades()` stays
+  the source of truth and is worth reconciling against on a timer.
 - Deliveries are unordered. Apply a trade only if its `updated_at` beats what you hold for that `id`.
-- Up to 6 retries, then the delivery is dropped. Keep `trading.trades()` as the source of truth and
-  reconcile against it.
-- Unknown event names come through with `trade: null`; ignore them.
-- `WEBHOOK_SOURCE_IPS` lists the three sending addresses. It is a filter, not authentication.
+- The URL is registered under **Settings → Developer** on the site; there is no API for it. The
+  secret is derived from the API key, so rerolling the key rotates it.
+- `WEBHOOK_SOURCE_IPS` lists the three sending addresses. A filter, not authentication.
 
-## Feed
+### Feed
 
-Marketplace-wide listing activity. It carries no account events (those are webhooks).
-
-```ts
-const feed = sdk.feed();
-feed.on('listing.created', (listing) => { /* full item fields: float, seed, stickers */ });
-feed.on('listing.price_changed', ({ listing_id, price_after }) => {});
-feed.on('error', (err) => {});
-await feed.connect();
-await feed.subscribe({ events: ['listing.created'], app_ids: [730] });  // replaces the filter
-```
-
-- Events for one listing can arrive out of order. The feed drops any event whose `seq` does not
-  beat the last one applied for that listing (`dropStale: false` turns this off).
-- Reconnects with backoff and re-sends the filter. Close codes `4401` (bad key) and `4429` (more
-  than 3 sockets per user) are final.
-
-For a local copy of the whole book, `LiveBook` runs the documented sync (buffer events, load
-`GET /book`, drop what the snapshot already covers, replay the rest) and redoes it after every
-reconnect:
+`sdk.createWebSocket({ appIds, events })` follows marketplace-wide listing activity over
+`wss://api.cs.deals/public/v1/ws`. It carries no account events; those are webhooks.
 
 ```ts
-const book = await sdk.liveBook({ app_id: 730 });
-book.listings;            // Map<listing id, LeanListing>, always current
-book.onChange((event) => {});
-book.stop();
+const ws = sdk.createWebSocket({ appIds: [AppId.Rust], events: ['listing.created'] });
+ws.on('event', (event) => {});         // FeedEvent, discriminated on event.event
+ws.on('connect', (reconnect) => {});
+ws.on('error', (err) => {});
+await ws.connect();                    // resolves once the filter is acknowledged
 ```
 
-## Rate Limits
+- The key rides in the `Authorization` header, never the URL.
+- Events for one listing can arrive out of order; one whose `seq` does not beat the last applied for
+  that listing is dropped.
+- The server sends no heartbeat, so a socket silent past `idleTimeoutMs` (120s) is dropped and
+  reconnected. Reconnects back off 1s to 30s and re-send the filter.
+- Close codes `4401` (bad key, `CsDealsAuthError`) and `4429` (more than 3 sockets per user) are final.
 
-Limits are per key, per endpoint. `RATE_LIMITS` exports the table (corrected against live
-headers). The tight ones:
+`sdk.createLiveBook({ appId })` keeps a local copy of the active book the way CS Deals documents it:
+hold feed events, read `GET /book`, drop what the snapshot already covers, replay the rest. It
+re-reads after every reconnect and every `resyncIntervalMs` (5 minutes; 0 turns it off), retries a
+failed read with backoff, and reports what each read corrected:
+
+```ts
+const book = sdk.createLiveBook({ appId: AppId.Rust });
+book.on('sync', ({ initial, added, changed, removed }) => {});   // what the feed had missed
+book.on('change', (event) => {});                                // live, after the snapshot
+book.on('error', (err) => {});
+await book.start();
+book.listings;     // Map<listing id, BookListing>
+book.syncedAt;     // epoch ms of the last good read; an old value means reads are failing
+await book.stop();
+```
+
+`GET /book` is limited to 6 a minute, so keep one `LiveBook` per process.
+
+## Rate limits
+
+Per key, per endpoint. A 429 throws with `retryAfterSec` from the `Retry-After` header.
 
 | Route | Limit |
-|---|---|
-| `listings`, `trades` | 1 / second (pages of 500 or 1000) |
+| --- | --- |
+| `listings`, `trades` | 1 / second |
 | `sales` | 1 / 5 seconds |
 | `book` | 6 / minute |
 | `steam-inventory`, `orders/export`, `crypto-withdraw` | 5 / minute |
 | `withdraw` | not limited |
 
-`onRateLimit` receives `X-RateLimit-Limit/Remaining/Reset` after every response. The iterators
-pace themselves (`minIntervalMs`) to their route's meter. Reads retry a 429 after `Retry-After`,
-unless it is longer than `maxRetryDelayMs` (10 s), in which case the error is handed back.
+## Errors
+
+Every non-2xx throws `CsDealsApiError` with `status`, `code` (the API's `error` string; the
+documented ones are in `CsDealsErrorCode`), `data` (e.g. `listing_ids` on `LISTING_PRICE_CHANGED`),
+the raw `body`, `retryAfterSec`, and the helpers `isRateLimited` (429) and `isRetryable`
+(408/429/5xx). Transport failures and timeouts reject with the underlying error.
+
+```ts
+try {
+  await sdk.trading.purchase(lines);
+} catch (err) {
+  if (err instanceof CsDealsApiError && err.code === CsDealsErrorCode.ListingPriceChanged) {
+    const lost = err.data?.listing_ids;   // losing a race is normal: drop these and move on
+  } else throw err;
+}
+```
 
 ## Options
 
 ```ts
 new CsDealsSDK({
-  apiKey,                 // required
-  webhookSecret,          // enables verifyWebhook
-  baseUrl,                // default https://api.cs.deals (https only)
-  timeoutMs,              // default 15 s; bulk reads raise their own
-  maxRetries,             // default 2, GETs only
-  maxRetryDelayMs,        // default 10 s
-  maxResponseBytes,       // default 8 MB; bulk reads raise their own
-  fetch,                  // inject for tests or proxies
-  onRateLimit,
+  apiKey,          // required
+  webhookSecret,   // enables sdk.webhooks.verify
+  baseUrl,         // default https://api.cs.deals/public/v1
+  wsUrl,           // default wss://api.cs.deals/public/v1/ws
+  timeout,         // ms, default 30s; bulk reads raise their own
+  proxy,           // socks5://, http://, https://, or a bare host:port (socks5)
 });
 ```
 
-`sdk.request(method, path, options)` reaches any route this SDK does not model yet, under the same
-retry rules.
+`sdk.client` exposes `get`, `getConditional`, `post` and `patch` for any route this SDK does not
+model yet.
 
-## Environment Variables
+## Development
 
 ```bash
-CSDEALS_API_KEY=csd_...
-CSDEALS_WEBHOOK_SECRET=whsec_...
+pnpm install
+pnpm typecheck
+pnpm test        # local HTTP + WebSocket server, no key needed
+pnpm build
+pnpm smoke       # READ-ONLY check against the live API, key from .env (CSDEALS_API_KEY)
 ```
-
-`pnpm smoke` runs a **read-only** check against the live API with the key from `.env`.
 
 ## License
 

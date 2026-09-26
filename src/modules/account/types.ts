@@ -1,22 +1,14 @@
-import type { AppIdParam, Cents, IsoDateTime, PageMetadata, PageParams, RequestOptions } from "../../core/types.js";
-
-// ── Entities ──
-
-export interface ApiInfo {
-  version: string;
-  websocket: { path: string; auth: string };
-  events: string[];
-  rest: string[];
-}
+import type { PageMetadata, PageParams } from '../../core/types.js';
 
 export interface User {
   id: number;
   steam_id: string | null;
   name: string;
-  balance: Cents;
+  /** Cents. */
+  balance: number;
 }
 
-export type OrderSide = "bought" | "sold";
+export type OrderSide = 'bought' | 'sold';
 
 export interface Order {
   order_item_id: number;
@@ -24,9 +16,9 @@ export interface Order {
   side: OrderSide;
   app_id: number;
   market_hash_name: string;
-  price: Cents;
+  price: number;
   amount: number;
-  created_at: IsoDateTime;
+  created_at: string;
 }
 
 export interface OrdersResponse {
@@ -41,41 +33,38 @@ export interface ExportedOrder {
   app_id: number;
   market_hash_name: string;
   amount: number;
-  unit_price: Cents;
-  total_value: Cents;
-  /** Selling commission; only ever set on `sold` rows. */
-  fee: Cents | null;
-  net: Cents;
-  created_at: IsoDateTime;
-  settled_at: IsoDateTime | null;
+  unit_price: number;
+  total_value: number;
+  /** Selling commission; only on `sold` rows. */
+  fee: number | null;
+  net: number;
+  created_at: string;
+  settled_at: string | null;
 }
 
 export interface OrdersExport {
   orders: ExportedOrder[];
 }
 
-export const TRANSACTION_ACTIONS = [
-  "DEPOSIT",
-  "WITHDRAWAL",
-  "WITHDRAWAL_REFUND",
-  "INSTANT_SELL_PAYOUT",
-  "PURCHASE",
-  "SALE",
-  "BALANCE_ADJUSTMENT",
-  "TRADE_REVERSAL_REFUND",
-] as const;
-
-export type TransactionAction = (typeof TRANSACTION_ACTIONS)[number];
+export type TransactionAction =
+  | 'DEPOSIT'
+  | 'WITHDRAWAL'
+  | 'WITHDRAWAL_REFUND'
+  | 'INSTANT_SELL_PAYOUT'
+  | 'PURCHASE'
+  | 'SALE'
+  | 'BALANCE_ADJUSTMENT'
+  | 'TRADE_REVERSAL_REFUND';
 
 export interface Transaction {
   id: number;
   action: TransactionAction;
   /** Signed. */
-  amount: Cents;
+  amount: number;
   /** Running balance after this movement. */
-  balance: Cents;
+  balance: number;
   message: string;
-  created_at: IsoDateTime;
+  created_at: string;
 }
 
 export interface TransactionsResponse {
@@ -83,52 +72,38 @@ export interface TransactionsResponse {
   metadata: PageMetadata;
 }
 
-export type CryptoTicker = "BTC" | "LTC" | "ETH" | "USDC" | "SOL";
-export type CryptoFeeLevel = "LOW" | "MEDIUM" | "HIGH";
+export type CryptoTicker = 'BTC' | 'LTC' | 'ETH' | 'USDC' | 'SOL';
 
-export type CryptoWithdrawalStatus =
-  | "CREATED"
-  | "PENDING"
-  | "CANCELLED"
-  | "DECLINED"
-  | "FAILED"
-  | "CONFIRMING"
-  | "SUCCESS"
-  | "CHARGEBACK";
+export type CryptoWithdrawalStatus = 'CREATED' | 'PENDING' | 'CANCELLED' | 'DECLINED' | 'FAILED' | 'CONFIRMING' | 'SUCCESS' | 'CHARGEBACK';
 
 export interface CryptoWithdrawal {
   withdrawal_id: number;
   status: CryptoWithdrawalStatus;
   /** Deducted from the balance in full; fees come off it. */
-  balance_amount: Cents;
+  balance_amount: number;
   token_amount: number;
   ticker: CryptoTicker;
-  created_at: IsoDateTime;
+  created_at: string;
   /** Set from `CONFIRMING` on. */
   tx_hash: string | null;
   network_fee: string | null;
 }
 
-// ── Params ──
-
-export interface OrdersParams extends PageParams, RequestOptions {}
-
-export interface ExportOrdersParams extends RequestOptions {
+export interface ExportOrdersParams {
   side?: OrderSide;
-  app_id?: AppIdParam;
-  from?: string | Date;
-  to?: string | Date;
+  appId?: number;
+  from?: Date | string;
+  to?: Date | string;
 }
 
-export interface TransactionsParams extends PageParams, RequestOptions {
+export interface GetTransactionsParams extends PageParams {
   action?: TransactionAction;
 }
 
-export interface CryptoWithdrawParams extends RequestOptions {
-  /** Cents off the balance, fees included. Below the per-currency minimum answers 400. */
-  amount: Cents;
+export interface CryptoWithdrawParams {
+  /** Cents off the balance, fees included. */
+  amount: number;
   ticker: CryptoTicker;
   address: string;
-  fee_level?: CryptoFeeLevel;
-  two_factor_auth_token?: string;
+  twoFactorToken?: string;
 }
