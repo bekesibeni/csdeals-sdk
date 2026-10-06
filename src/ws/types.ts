@@ -21,7 +21,7 @@ export interface ListingPriceChangedEvent {
 export interface ListingAmountChangedEvent {
   listing_id: number;
   app_id: number;
-  /** 0 means sold out. */
+  /** 0 when the copy sells. 1 only while cs.deals splits an old stacked listing. */
   new_amount: number;
 }
 

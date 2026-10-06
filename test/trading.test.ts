@@ -8,33 +8,35 @@ afterEach(async () => {
   server = undefined;
 });
 
-const order = (items: { price: number; amount: number }[]): PurchaseResult => ({
+const order = (prices: number[]): PurchaseResult => ({
   order_id: 9001,
   created_at: 't',
-  items: items.map((item, i) => ({ order_item_id: i + 1, app_id: 252490, market_hash_name: 'Red Beenie Hat', steam_asset_id: String(i), ...item })),
+  items: prices.map((price, i) => ({ order_item_id: i + 1, app_id: 252490, market_hash_name: 'Red Beenie Hat', steam_asset_id: String(i), price, amount: 1 })),
 });
 
 async function buyAgainst(reply: Reply) {
   server = await startServer(() => reply);
   return server.sdk.trading.purchase([
-    { listingId: 11, amount: 2, maxPrice: 100 },
-    { listingId: 12, amount: 1, maxPrice: 250 },
+    { listingId: 11, maxPrice: 100 },
+    { listingId: 12, maxPrice: 100 },
+    { listingId: 13, maxPrice: 250 },
   ]);
 }
 
 describe('purchase', () => {
   // max_price is the only thing standing between a moved listing and an overpaid order. A mapping
   // that dropped or renamed it would buy at whatever the listing costs by the time the call lands.
-  it('sends every line with its ceiling on the wire, authenticated', async () => {
-    await buyAgainst({ body: order([{ price: 90, amount: 2 }, { price: 250, amount: 1 }]) });
+  it('sends every line as one copy with its ceiling on the wire, authenticated', async () => {
+    await buyAgainst({ body: order([90, 90, 250]) });
     const [req] = server!.requests;
     expect(req?.method).toBe('POST');
     expect(req?.path).toBe('/public/v1/purchase');
     expect(req?.headers.authorization).toBe(`Bearer ${KEY}`);
     expect(req?.body).toEqual({
       items: [
-        { listing_id: 11, amount: 2, max_price: 100 },
-        { listing_id: 12, amount: 1, max_price: 250 },
+        { listing_id: 11, amount: 1, max_price: 100 },
+        { listing_id: 12, amount: 1, max_price: 100 },
+        { listing_id: 13, amount: 1, max_price: 250 },
       ],
     });
   });
@@ -42,19 +44,19 @@ describe('purchase', () => {
   // The order stands whatever we do next, so the caller must reconcile it instead of treating the
   // throw as "not bought" and buying again.
   it('throws PurchaseMismatchError carrying the order when a copy was charged above every ceiling', async () => {
-    const err = await buyAgainst({ body: order([{ price: 90, amount: 2 }, { price: 300, amount: 1 }]) }).catch((e: unknown) => e);
+    const err = await buyAgainst({ body: order([90, 90, 300]) }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PurchaseMismatchError);
     expect((err as PurchaseMismatchError).order.order_id).toBe(9001);
   });
 
   it('throws when the basket total beats the ceilings even though each copy is under the highest one', async () => {
-    const err = await buyAgainst({ body: order([{ price: 200, amount: 2 }, { price: 100, amount: 1 }]) }).catch((e: unknown) => e);
+    const err = await buyAgainst({ body: order([200, 200, 100]) }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PurchaseMismatchError);
   });
 
   // Fewer copies than asked means we would promise the client items that never reached the backpack.
   it('throws when the copy count differs from the request', async () => {
-    const err = await buyAgainst({ body: order([{ price: 90, amount: 1 }, { price: 250, amount: 1 }]) }).catch((e: unknown) => e);
+    const err = await buyAgainst({ body: order([90, 250]) }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PurchaseMismatchError);
   });
 

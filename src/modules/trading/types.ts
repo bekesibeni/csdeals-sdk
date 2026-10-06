@@ -7,6 +7,7 @@ export interface PurchasedItem {
   steam_asset_id: string;
   /** Charged per copy: at or below the line's `maxPrice`. */
   price: number;
+  /** Always 1. */
   amount: number;
 }
 
@@ -47,10 +48,9 @@ export interface TradesResponse {
   metadata: PageMetadata;
 }
 
+/** One listing, one copy. Buy several copies with several lines. */
 export interface PurchaseLine {
   listingId: number;
-  /** 1-500. */
-  amount: number;
   /** A ceiling in cents: a cheaper listing fills at its current price, a dearer one fails the order. */
   maxPrice: number;
   /** From a private listing's share link. */

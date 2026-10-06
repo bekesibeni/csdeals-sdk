@@ -1,6 +1,6 @@
 {
   "name": "csdeals-sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A TypeScript SDK for the CS Deals (cs.deals) public v1 API (market, trading, listing feed, webhooks)",
   "author": "benji",
   "license": "Proprietary",

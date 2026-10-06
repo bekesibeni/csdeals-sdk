@@ -35,7 +35,7 @@ const { balance } = await sdk.account.getUser();     // cents
 
 const { listings } = await sdk.market.getListings({ appId: AppId.Rust, limit: 500 });
 const order = await sdk.trading.purchase([
-  { listingId: listings[0].id, amount: 1, maxPrice: listings[0].price },
+  { listingId: listings[0].id, maxPrice: listings[0].price },
 ]);
 
 const { items } = await sdk.trading.getBackpack({ appId: AppId.Rust });
@@ -48,6 +48,10 @@ Every price, balance and amount is an **integer in cents** (`4250` = $42.50), bo
 camelCase; responses are the wire shape, `snake_case`, exactly what the docs show.
 
 ## Things that will bite you
+
+**A listing holds one copy.** Since 2026-10-06 every copy for sale is its own listing with `amount: 1`:
+40 copies of a commodity are 40 listings. A purchase line buys exactly one listing, so several copies
+mean several lines, and losing a race to another buyer answers `LISTING_NOT_FOUND`.
 
 **A purchase has no idempotency key.** Sending the same order twice buys twice, so the SDK never
 resends anything and neither should you. On a timeout or a 5xx, read the outcome back before trying
@@ -103,7 +107,7 @@ on a 304.
 
 | Method | Endpoint |
 | --- | --- |
-| `purchase(lines)` | `POST /purchase`, atomic: every line fills or none does |
+| `purchase(lines)` | `POST /purchase`, atomic, one copy per line: every line fills or none does |
 | `getBackpack({ appId, search, page, limit })` | `GET /backpack` |
 | `withdraw({ items, twoFactorToken })` | `POST /withdraw`, backpack to the linked Steam account |
 | `deposit(items)` | `POST /deposit`, Steam to backpack, unlisted |
@@ -115,21 +119,17 @@ on a 304.
 | --- | --- |
 | `getSteamInventory(appId)` | `GET /steam-inventory`, tokens valid 30 minutes |
 | `sell(groups)` | `POST /sell`, Steam items straight to listings |
-| `list(groups)` | `POST /list`, backpack items to listings, fixed price or `priceDecay` |
-| `editListing(change)` / `editListings(changes)` | `PATCH /list`, one or up to 50 |
-| `delist(id)` / `delistMany(ids)` | `POST /delist`, one or up to 50, items return to the backpack |
+| `list(groups)` | `POST /list`, backpack items to one listing per copy, fixed price or `priceDecay` |
+| `editListing(change)` / `editListings(changes)` | `PATCH /list`, price only, one or up to 50 each on its own |
+| `repriceListings(ids, { price or priceDecay })` | `PATCH /list`, up to 500 at one price, all or nothing |
+| `delist(id)` / `delistMany(ids)` | `POST /delist`, one or up to 500 all or nothing, items return to the backpack |
 | `getMyListings({ appId, status, page, limit })` | `GET /my-listings` |
 | `getMyListingsValue(appId?)` | `GET /my-listings/value` |
 
-`editListing` does different things depending on what is sent:
-
-| Sent | Effect |
-| --- | --- |
-| `price` | Reprices the whole stack in place |
-| `amount` | Grows the listing from the backpack, or shrinks it and returns the surplus |
-| `amount` + `price` | **Partial reprice**: this listing keeps `amount` at the new price, the rest moves to a new listing at the old price, even when the price is unchanged |
-
-A price updater should send `price` only.
+An edit changes the price only; sending `amount` is a `BAD_REQUEST`. To sell more copies, list them; to
+sell fewer, delist them. A bulk `repriceListings` or `delistMany` does not say which id failed: after
+an error, refetch `getMyListings` and retry with the ids still there. While listing is switched
+off site-wide, listing, repricing and delisting answer 503 `LISTING_DISABLED`.
 
 `sdk.account`
 

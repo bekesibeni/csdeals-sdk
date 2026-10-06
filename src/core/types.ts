@@ -70,6 +70,7 @@ export interface LeanListing {
   app_id: number;
   market_hash_name: string;
   price: number;
+  /** Always 1: a listing holds one copy. */
   amount: number;
   commodity: boolean;
   created_at: string;

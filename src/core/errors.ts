@@ -24,6 +24,8 @@ export enum CsDealsErrorCode {
   WithdrawDailyLimitExceeded = 'WITHDRAW_DAILY_LIMIT_EXCEEDED',
   WithdrawDisabled = 'WITHDRAW_DISABLED',
   ListingLimitReached = 'LISTING_LIMIT_REACHED',
+  ListingDisabled = 'LISTING_DISABLED',
+  MaintenanceMode = 'MAINTENANCE_MODE',
   InvalidWebhookUrl = 'INVALID_WEBHOOK_URL',
   RateLimited = 'RATE_LIMITED',
   Unauthorised = 'UNAUTHORISED',

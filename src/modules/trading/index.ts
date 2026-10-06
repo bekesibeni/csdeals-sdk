@@ -17,8 +17,8 @@ import type {
 function matchesRequest(order: PurchaseResult, lines: PurchaseLine[]): boolean {
   const items = order.items ?? [];
   const ceiling = Math.max(...lines.map((line) => line.maxPrice));
-  const allowed = lines.reduce((sum, line) => sum + line.maxPrice * line.amount, 0);
-  const requested = lines.reduce((sum, line) => sum + line.amount, 0);
+  const allowed = lines.reduce((sum, line) => sum + line.maxPrice, 0);
+  const requested = lines.length;
   const charged = items.reduce((sum, item) => sum + item.price * item.amount, 0);
   const copies = items.reduce((sum, item) => sum + item.amount, 0);
   return items.every((item) => item.price <= ceiling) && charged <= allowed && copies === requested;
@@ -34,7 +34,7 @@ export function initTradingModule(client: CsDealsClient) {
       const order = await client.post<PurchaseResult>('purchase', {
         items: lines.map((line) => ({
           listing_id: line.listingId,
-          amount: line.amount,
+          amount: 1,
           max_price: line.maxPrice,
           private_token: line.privateToken,
         })),

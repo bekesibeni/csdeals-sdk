@@ -34,7 +34,7 @@ export interface EditResult extends BulkResult {
 }
 
 export interface EditListingsResult {
-  /** In request order; each listing is its own transaction. */
+  /** In request order; each listing is its own transaction. `LISTING_DISABLED` lands per row here. */
   results: EditResult[];
 }
 
@@ -43,7 +43,12 @@ export interface DelistResult {
 }
 
 export interface DelistManyResult {
+  /** Every id with `ok: true`: the call is all or nothing and throws otherwise. */
   results: BulkResult[];
+}
+
+export interface RepriceResult {
+  listings: LeanListing[];
 }
 
 export interface PriceDecayState {
@@ -54,7 +59,7 @@ export interface PriceDecayState {
 }
 
 export interface MyListing extends LeanListing {
-  /** How many more copies can be added from the backpack. */
+  /** Commodities only: how many more copies the backpack could list. 0 otherwise. */
   available_amount: number;
   price_decay: PriceDecayState | null;
 }
@@ -92,23 +97,24 @@ export interface BackpackLine {
   amount: number;
 }
 
-/** One listing: a flat `price` or a `priceDecay` curve, not both. */
+/** A flat `price` or a `priceDecay` curve, not both. Lists one listing per copy. */
 export interface ListGroup {
   items: BackpackLine[];
   price?: number;
   priceDecay?: PriceDecay;
 }
 
-/**
- * `price` alone reprices the whole stack in place. `amount` alone grows or shrinks it. `amount` WITH
- * `price` is a partial reprice: this listing keeps `amount` at the new price and the rest moves to a
- * new listing at the old one, even when the price is unchanged.
- */
+/** Price only: a listing holds one copy, so there is no amount to edit. */
 export interface ListingEdit {
   listingId: number;
   price?: number;
   priceDecay?: PriceDecay;
-  amount?: number;
+}
+
+/** A flat `price` or a `priceDecay` curve, not both. */
+export interface Reprice {
+  price?: number;
+  priceDecay?: PriceDecay;
 }
 
 export interface GetMyListingsParams extends PageParams {

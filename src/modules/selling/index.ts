@@ -11,6 +11,8 @@ import type {
   MyListingsResponse,
   MyListingsValue,
   PriceDecay,
+  Reprice,
+  RepriceResult,
   SellGroup,
   SellResult,
   SteamInventoryResponse,
@@ -21,7 +23,7 @@ function decay(curve: PriceDecay | undefined) {
 }
 
 function edit(change: ListingEdit) {
-  return { listing_id: change.listingId, price: change.price, price_decay: decay(change.priceDecay), amount: change.amount };
+  return { listing_id: change.listingId, price: change.price, price_decay: decay(change.priceDecay) };
 }
 
 export function initSellingModule(client: CsDealsClient) {
@@ -41,7 +43,7 @@ export function initSellingModule(client: CsDealsClient) {
       });
     },
 
-    /** Lists backpack items, one listing per group. */
+    /** Lists backpack items, one listing per copy; the result holds every listing created. */
     async list(groups: ListGroup[]): Promise<ListResult> {
       return client.post('list', {
         listings: groups.map((group) => ({
@@ -61,11 +63,17 @@ export function initSellingModule(client: CsDealsClient) {
       return client.patch('list', { listings: changes.map(edit) });
     },
 
+    /** Up to 500 listings to one price in one transaction: any missing, foreign or inactive id fails it all. */
+    async repriceListings(listingIds: number[], change: Reprice): Promise<RepriceResult> {
+      return client.patch('list', { listing_ids: listingIds, price: change.price, price_decay: decay(change.priceDecay) });
+    },
+
     /** Takes a listing down; its items return to the backpack. */
     async delist(listingId: number): Promise<DelistResult> {
       return client.post('delist', { listing_id: listingId });
     },
 
+    /** Up to 500 in one transaction. A missing or foreign id fails it all without naming the id. */
     async delistMany(listingIds: number[]): Promise<DelistManyResult> {
       return client.post('delist', { listing_ids: listingIds });
     },

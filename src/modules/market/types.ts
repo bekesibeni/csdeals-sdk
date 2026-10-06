@@ -31,6 +31,7 @@ export interface PricesResponse {
 export interface AllPricesRow extends PriceRow {
   /** Units listed. */
   stock: number;
+  /** Equals `stock`: one listing per copy. */
   listing_count: number;
 }
 
